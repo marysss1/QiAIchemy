@@ -1,5 +1,5 @@
 # QiAIchemy
-
+git commit --amend --reset-author
 QiAIchemy = **Qi** (中医“气”) + **AI** + **Alchemy**（炼化/转化）。  
 项目定位为一个融合中医养生知识与健康数据分析的 iOS 智能健康助手原型。
 

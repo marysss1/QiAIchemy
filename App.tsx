@@ -5,13 +5,13 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  SafeAreaView,
   StatusBar,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 type AuthMode = 'login' | 'register';
 
@@ -21,19 +21,34 @@ type AuthUser = {
   email: string;
 };
 
-const API_BASE_URL = 'http://43.138.212.17:6688';
+const API_BASE_URL = 'http://127.0.0.1:2818';
+
+async function readApiResponse<T>(response: Response): Promise<{ data: T | null; rawText: string }> {
+  const rawText = await response.text();
+  const contentType = response.headers.get('content-type') ?? '';
+  const looksLikeJson = contentType.includes('application/json') || /^[\s]*[\[{]/.test(rawText);
+
+  if (!looksLikeJson) {
+    return { data: null, rawText };
+  }
+
+  try {
+    return { data: (rawText ? JSON.parse(rawText) : {}) as T, rawText };
+  } catch {
+    return { data: null, rawText };
+  }
+}
 
 function App(): React.JSX.Element {
   return (
-    <SafeAreaProvider>
+    <SafeAreaView style={styles.screen}>
       <StatusBar barStyle="dark-content" backgroundColor="#f6eddd" />
       <LoginScreen />
-    </SafeAreaProvider>
+    </SafeAreaView>
   );
 }
 
 function LoginScreen(): React.JSX.Element {
-  const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<AuthMode>('login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -80,14 +95,18 @@ function LoginScreen(): React.JSX.Element {
         body: JSON.stringify(body),
       });
 
-      const data = (await response.json()) as {
+      const { data } = await readApiResponse<{
         message?: string;
         token?: string;
         user?: AuthUser;
-      };
+      }>(response);
 
-      if (!response.ok || !data.token || !data.user) {
-        throw new Error(data.message ?? '请求失败，请检查服务端');
+      if (!response.ok || !data?.token || !data?.user) {
+        const fallbackMessage =
+          response.status >= 500
+            ? `服务暂时不可用（HTTP ${response.status}）`
+            : `请求失败（HTTP ${response.status}）`;
+        throw new Error(data?.message ?? fallbackMessage);
       }
 
       setToken(data.token);
@@ -113,10 +132,16 @@ function LoginScreen(): React.JSX.Element {
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
       });
-      const data = (await response.json()) as { message?: string; user?: AuthUser };
-      if (!response.ok || !data.user) {
-        throw new Error(data.message ?? '获取用户信息失败');
+      const { data } = await readApiResponse<{ message?: string; user?: AuthUser }>(response);
+
+      if (!response.ok || !data?.user) {
+        const fallbackMessage =
+          response.status >= 500
+            ? `服务暂时不可用（HTTP ${response.status}）`
+            : `获取用户信息失败（HTTP ${response.status}）`;
+        throw new Error(data?.message ?? fallbackMessage);
       }
+
       setCurrentUser(data.user);
       Alert.alert('成功', '已刷新用户信息');
     } catch (error) {
@@ -146,8 +171,8 @@ function LoginScreen(): React.JSX.Element {
           style={[
             styles.content,
             {
-              paddingTop: Math.max(insets.top + 18, 30),
-              paddingBottom: Math.max(insets.bottom + 18, 24),
+              paddingTop: 30,
+              paddingBottom: 24,
             },
           ]}
         >
@@ -207,6 +232,11 @@ function LoginScreen(): React.JSX.Element {
                 <Text style={styles.label}>密码</Text>
                 <TextInput
                   autoCapitalize="none"
+                  autoComplete="off"
+                  textContentType="oneTimeCode"
+                  importantForAutofill="no"
+                  autoCorrect={false}
+                  spellCheck={false}
                   placeholder={mode === 'login' ? '请输入密码' : '请设置密码（至少8位）'}
                   placeholderTextColor="#99866b"
                   secureTextEntry
@@ -220,6 +250,11 @@ function LoginScreen(): React.JSX.Element {
                     <Text style={styles.label}>确认密码</Text>
                     <TextInput
                       autoCapitalize="none"
+                      autoComplete="off"
+                      textContentType="oneTimeCode"
+                      importantForAutofill="no"
+                      autoCorrect={false}
+                      spellCheck={false}
                       placeholder="请再次输入密码"
                       placeholderTextColor="#99866b"
                       secureTextEntry
@@ -309,7 +344,7 @@ const styles = StyleSheet.create({
     color: '#2f2115',
     fontSize: 34,
     letterSpacing: 2,
-    fontFamily: Platform.OS === 'ios' ? 'STKaiti' : undefined,
+    fontFamily: Platform.OS === 'ios' ? 'STKaiti' : 'serif',
   },
   enTitle: {
     marginTop: 8,

@@ -4,13 +4,13 @@
   "private": true,
   "author": "Mengyu Su",
   "contributors": [
-    "Primo Pan (Assistant)"
+    "Primo Pan (Assistant,FrontEnd Bridge)"
   ],
   "scripts": {
-    "android": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-android --port 8088",
-    "ios": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-ios --port 8088",
+    "android": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-android",
+    "ios": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-ios",
     "lint": "eslint .",
-    "start": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js start --port 8088",
+    "start": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js start",
     "test": "jest"
   },
   "dependencies": {

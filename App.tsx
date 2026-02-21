@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Platform,
@@ -12,6 +13,16 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+type AuthMode = 'login' | 'register';
+
+type AuthUser = {
+  id: string;
+  name?: string;
+  email: string;
+};
+
+const API_BASE_URL = 'http://43.138.212.17:6688';
+
 function App(): React.JSX.Element {
   return (
     <SafeAreaProvider>
@@ -23,11 +34,103 @@ function App(): React.JSX.Element {
 
 function LoginScreen(): React.JSX.Element {
   const insets = useSafeAreaInsets();
-  const [phone, setPhone] = useState('');
+  const [mode, setMode] = useState<AuthMode>('login');
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [token, setToken] = useState('');
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const onLogin = () => {
-    Alert.alert('QiAlchemy', 'Login flow is ready for backend integration.');
+  const onSubmit = async () => {
+    const normalizedBase = API_BASE_URL.replace(/\/+$/, '');
+
+    if (!email.trim() || !password.trim()) {
+      Alert.alert('提示', '邮箱和密码不能为空');
+      return;
+    }
+
+    if (mode === 'register' && !name.trim()) {
+      Alert.alert('提示', '注册模式下请填写昵称');
+      return;
+    }
+
+    if (mode === 'register' && password.trim().length < 8) {
+      Alert.alert('提示', '密码至少8位');
+      return;
+    }
+
+    if (mode === 'register' && confirmPassword.trim() !== password.trim()) {
+      Alert.alert('提示', '两次输入的密码不一致');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
+      const body =
+        mode === 'login'
+          ? { email: email.trim(), password: password.trim() }
+          : { name: name.trim(), email: email.trim(), password: password.trim() };
+
+      const response = await fetch(`${normalizedBase}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const data = (await response.json()) as {
+        message?: string;
+        token?: string;
+        user?: AuthUser;
+      };
+
+      if (!response.ok || !data.token || !data.user) {
+        throw new Error(data.message ?? '请求失败，请检查服务端');
+      }
+
+      setToken(data.token);
+      setCurrentUser(data.user);
+      Alert.alert('成功', mode === 'login' ? '登录成功' : '注册并登录成功');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '网络错误';
+      Alert.alert('失败', message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onFetchMe = async () => {
+    if (!token) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const normalizedBase = API_BASE_URL.replace(/\/+$/, '');
+      const response = await fetch(`${normalizedBase}/api/auth/me`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = (await response.json()) as { message?: string; user?: AuthUser };
+      if (!response.ok || !data.user) {
+        throw new Error(data.message ?? '获取用户信息失败');
+      }
+      setCurrentUser(data.user);
+      Alert.alert('成功', '已刷新用户信息');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '请求失败';
+      Alert.alert('失败', message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onLogout = () => {
+    setToken('');
+    setCurrentUser(null);
+    setPassword('');
   };
 
   return (
@@ -52,37 +155,108 @@ function LoginScreen(): React.JSX.Element {
             <View style={styles.seal} />
             <Text style={styles.cnTitle}>岐元灵术</Text>
             <Text style={styles.enTitle}>QiAlchemy</Text>
-            <Text style={styles.subtitle}>AI-guided wellness rooted in traditional wisdom</Text>
+            <Text style={styles.subtitle}>中医养生与AI融合实验</Text>
           </View>
 
           <View style={styles.card}>
-            <Text style={styles.label}>Phone</Text>
-            <TextInput
-              autoCapitalize="none"
-              keyboardType="phone-pad"
-              placeholder="Enter mobile number"
-              placeholderTextColor="#99866b"
-              style={styles.input}
-              value={phone}
-              onChangeText={setPhone}
-            />
+            {!token ? (
+              <>
+                <View style={styles.tabWrap}>
+                  <Pressable
+                    style={[styles.tabButton, mode === 'login' && styles.tabButtonActive]}
+                    onPress={() => {
+                      setMode('login');
+                      setConfirmPassword('');
+                    }}
+                  >
+                    <Text style={[styles.tabText, mode === 'login' && styles.tabTextActive]}>登录</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.tabButton, mode === 'register' && styles.tabButtonActive]}
+                    onPress={() => setMode('register')}
+                  >
+                    <Text style={[styles.tabText, mode === 'register' && styles.tabTextActive]}>注册</Text>
+                  </Pressable>
+                </View>
 
-            <Text style={styles.label}>Password</Text>
-            <TextInput
-              autoCapitalize="none"
-              placeholder="Enter password"
-              placeholderTextColor="#99866b"
-              secureTextEntry
-              style={styles.input}
-              value={password}
-              onChangeText={setPassword}
-            />
+                {mode === 'register' && (
+                  <>
+                    <Text style={styles.label}>昵称</Text>
+                    <TextInput
+                      autoCapitalize="none"
+                      placeholder="请输入昵称"
+                      placeholderTextColor="#99866b"
+                      style={styles.input}
+                      value={name}
+                      onChangeText={setName}
+                    />
+                  </>
+                )}
 
-            <Pressable style={styles.button} onPress={onLogin}>
-              <Text style={styles.buttonText}>Login</Text>
-            </Pressable>
+                <Text style={styles.label}>邮箱</Text>
+                <TextInput
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                  placeholder="请输入邮箱地址"
+                  placeholderTextColor="#99866b"
+                  style={styles.input}
+                  value={email}
+                  onChangeText={setEmail}
+                />
 
-            <Text style={styles.helperText}>For iPhone users participating in health study.</Text>
+                <Text style={styles.label}>密码</Text>
+                <TextInput
+                  autoCapitalize="none"
+                  placeholder={mode === 'login' ? '请输入密码' : '请设置密码（至少8位）'}
+                  placeholderTextColor="#99866b"
+                  secureTextEntry
+                  style={styles.input}
+                  value={password}
+                  onChangeText={setPassword}
+                />
+
+                {mode === 'register' && (
+                  <>
+                    <Text style={styles.label}>确认密码</Text>
+                    <TextInput
+                      autoCapitalize="none"
+                      placeholder="请再次输入密码"
+                      placeholderTextColor="#99866b"
+                      secureTextEntry
+                      style={styles.input}
+                      value={confirmPassword}
+                      onChangeText={setConfirmPassword}
+                    />
+                  </>
+                )}
+
+                <Pressable style={[styles.button, loading && styles.buttonDisabled]} onPress={onSubmit} disabled={loading}>
+                  {loading ? (
+                    <ActivityIndicator color="#fff5ef" />
+                  ) : (
+                    <Text style={styles.buttonText}>{mode === 'login' ? '登录' : '注册并登录'}</Text>
+                  )}
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <View style={styles.userBox}>
+                  <Text style={styles.userTitle}>已登录</Text>
+                  <Text style={styles.userText}>邮箱：{currentUser?.email}</Text>
+                  <Text style={styles.userText}>昵称：{currentUser?.name || '未设置'}</Text>
+                </View>
+
+                <Pressable style={[styles.button, loading && styles.buttonDisabled]} onPress={onFetchMe} disabled={loading}>
+                  {loading ? <ActivityIndicator color="#fff5ef" /> : <Text style={styles.buttonText}>刷新资料</Text>}
+                </Pressable>
+
+                <Pressable style={styles.secondaryButton} onPress={onLogout}>
+                  <Text style={styles.secondaryButtonText}>退出登录</Text>
+                </Pressable>
+              </>
+            )}
+
+            <Text style={styles.helperText}>登录后可开始你的中医养生AI对话</Text>
           </View>
         </View>
       </KeyboardAvoidingView>
@@ -158,6 +332,32 @@ const styles = StyleSheet.create({
     paddingTop: 18,
     paddingBottom: 20,
   },
+  tabWrap: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+  },
+  tabButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#ceb28e',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#f8efe0',
+  },
+  tabButtonActive: {
+    backgroundColor: '#a7342d',
+    borderColor: '#a7342d',
+  },
+  tabText: {
+    color: '#6f5339',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  tabTextActive: {
+    color: '#fff5ef',
+  },
   label: {
     color: '#5f4227',
     fontSize: 13,
@@ -182,11 +382,47 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#b13c2f',
   },
+  buttonDisabled: {
+    opacity: 0.75,
+  },
   buttonText: {
     color: '#fff5ef',
     fontSize: 16,
     fontWeight: '700',
     letterSpacing: 0.3,
+  },
+  secondaryButton: {
+    marginTop: 10,
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#b13c2f',
+  },
+  secondaryButtonText: {
+    color: '#9b362b',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  userBox: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#d8c4a7',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+    backgroundColor: '#fffdf8',
+  },
+  userTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#4e3520',
+    marginBottom: 6,
+  },
+  userText: {
+    fontSize: 13,
+    color: '#6a533d',
+    marginBottom: 2,
   },
   helperText: {
     marginTop: 12,

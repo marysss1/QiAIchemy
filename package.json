@@ -7,10 +7,10 @@
     "Primo Pan (Assistant)"
   ],
   "scripts": {
-    "android": "react-native run-android",
-    "ios": "react-native run-ios",
+    "android": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-android --port 8088",
+    "ios": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-ios --port 8088",
     "lint": "eslint .",
-    "start": "react-native start",
+    "start": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js start --port 8088",
     "test": "jest"
   },
   "dependencies": {

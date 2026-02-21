@@ -53,6 +53,10 @@
 	</dict>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string></string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>用于读取你的步数和心率，生成个性化中医养生建议。</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>用于在你授权时写入健康数据。</string>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

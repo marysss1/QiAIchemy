@@ -12,6 +12,11 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import {
+  authorizeHealthKit,
+  loadHealthSnapshot,
+  type HealthSnapshot,
+} from './src/health/healthData';
 
 type AuthMode = 'login' | 'register';
 
@@ -22,6 +27,40 @@ type AuthUser = {
 };
 
 const API_BASE_URL = 'http://127.0.0.1:2818';
+const API_ERROR_MESSAGE_MAP: Record<string, string> = {
+  'Email already registered': '邮箱已被注册',
+  'Invalid email or password': '邮箱或密码错误',
+  Unauthorized: '未授权，请重新登录',
+  'Route not found': '接口不存在',
+  'Validation failed': '请求参数不合法',
+};
+
+function localizeErrorMessage(message: string, fallbackMessage: string): string {
+  const trimmedMessage = message.trim();
+  if (!trimmedMessage) {
+    return fallbackMessage;
+  }
+
+  if (API_ERROR_MESSAGE_MAP[trimmedMessage]) {
+    return API_ERROR_MESSAGE_MAP[trimmedMessage];
+  }
+
+  const normalized = trimmedMessage.toLowerCase();
+
+  if (normalized.includes('network request failed') || normalized.includes('failed to fetch')) {
+    return '网络请求失败，请确认后端服务已启动';
+  }
+
+  if (normalized.includes('timeout')) {
+    return '请求超时，请稍后重试';
+  }
+
+  if (normalized.includes('json parse error')) {
+    return '服务返回格式异常，请检查后端网关';
+  }
+
+  return trimmedMessage;
+}
 
 async function readApiResponse<T>(response: Response): Promise<{ data: T | null; rawText: string }> {
   const rawText = await response.text();
@@ -57,6 +96,11 @@ function LoginScreen(): React.JSX.Element {
   const [token, setToken] = useState('');
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(false);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthSnapshot, setHealthSnapshot] = useState<HealthSnapshot | null>(null);
+  const [healthError, setHealthError] = useState('');
+  const [healthAuthorized, setHealthAuthorized] = useState<boolean | null>(null);
+  const canUseHealth = Boolean(token);
 
   const onSubmit = async () => {
     const normalizedBase = API_BASE_URL.replace(/\/+$/, '');
@@ -106,14 +150,15 @@ function LoginScreen(): React.JSX.Element {
           response.status >= 500
             ? `服务暂时不可用（HTTP ${response.status}）`
             : `请求失败（HTTP ${response.status}）`;
-        throw new Error(data?.message ?? fallbackMessage);
+        throw new Error(localizeErrorMessage(data?.message ?? '', fallbackMessage));
       }
 
       setToken(data.token);
       setCurrentUser(data.user);
       Alert.alert('成功', mode === 'login' ? '登录成功' : '注册并登录成功');
     } catch (error) {
-      const message = error instanceof Error ? error.message : '网络错误';
+      const rawMessage = error instanceof Error ? error.message : '';
+      const message = localizeErrorMessage(rawMessage, '网络错误，请稍后重试');
       Alert.alert('失败', message);
     } finally {
       setLoading(false);
@@ -139,16 +184,60 @@ function LoginScreen(): React.JSX.Element {
           response.status >= 500
             ? `服务暂时不可用（HTTP ${response.status}）`
             : `获取用户信息失败（HTTP ${response.status}）`;
-        throw new Error(data?.message ?? fallbackMessage);
+        throw new Error(localizeErrorMessage(data?.message ?? '', fallbackMessage));
       }
 
       setCurrentUser(data.user);
       Alert.alert('成功', '已刷新用户信息');
     } catch (error) {
-      const message = error instanceof Error ? error.message : '请求失败';
+      const rawMessage = error instanceof Error ? error.message : '';
+      const message = localizeErrorMessage(rawMessage, '请求失败，请稍后重试');
       Alert.alert('失败', message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const onLoadHealthData = async (useMock = false) => {
+    if (!canUseHealth) {
+      Alert.alert('提示', '请先登录后再读取健康数据');
+      return;
+    }
+
+    setHealthLoading(true);
+    setHealthError('');
+    try {
+      const snapshot = await loadHealthSnapshot(useMock);
+      setHealthSnapshot(snapshot);
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : '';
+      setHealthError(localizeErrorMessage(rawMessage, '读取健康数据失败'));
+    } finally {
+      setHealthLoading(false);
+    }
+  };
+
+  const onAuthorizeHealth = async () => {
+    if (!canUseHealth) {
+      Alert.alert('提示', '请先登录后再进行 HealthKit 授权');
+      return;
+    }
+
+    setHealthLoading(true);
+    setHealthError('');
+    try {
+      const granted = await authorizeHealthKit();
+      setHealthAuthorized(granted);
+      if (!granted) {
+        setHealthError('未完成授权，请检查系统健康权限设置');
+      } else {
+        Alert.alert('成功', '已完成 HealthKit 一键授权');
+      }
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : '';
+      setHealthError(localizeErrorMessage(rawMessage, 'HealthKit 授权失败'));
+    } finally {
+      setHealthLoading(false);
     }
   };
 
@@ -156,7 +245,18 @@ function LoginScreen(): React.JSX.Element {
     setToken('');
     setCurrentUser(null);
     setPassword('');
+    setHealthSnapshot(null);
+    setHealthError('');
+    setHealthAuthorized(null);
   };
+
+  const displaySteps = healthSnapshot?.activity?.stepsToday;
+  const displayHeartRate = healthSnapshot?.heart?.latestHeartRateBpm;
+  const displaySleepMinutes = healthSnapshot?.sleep?.asleepMinutesLast36h;
+  const displayOxygen = healthSnapshot?.oxygen?.bloodOxygenPercent;
+  const displayGlucose = healthSnapshot?.metabolic?.bloodGlucoseMgDl;
+  const displayDaylight = healthSnapshot?.environment?.daylightMinutesToday;
+  const displayWorkoutCount = healthSnapshot?.workouts?.length;
 
   return (
     <View style={styles.screen}>
@@ -292,6 +392,78 @@ function LoginScreen(): React.JSX.Element {
             )}
 
             <Text style={styles.helperText}>登录后可开始你的中医养生AI对话</Text>
+
+            <View style={styles.healthPanel}>
+              <Text style={styles.healthTitle}>HealthKit 全量数据读取</Text>
+              {!canUseHealth ? (
+                <Text style={styles.healthLockedHint}>请先登录，登录后才能授权并读取健康数据</Text>
+              ) : null}
+              <View style={styles.healthActionRow}>
+                <Pressable
+                  style={[styles.healthActionButton, (!canUseHealth || healthLoading) && styles.buttonDisabled]}
+                  onPress={onAuthorizeHealth}
+                  disabled={!canUseHealth || healthLoading}
+                >
+                  <Text style={styles.healthActionText}>{healthLoading ? '处理中...' : '一键授权'}</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.healthActionButton, (!canUseHealth || healthLoading) && styles.buttonDisabled]}
+                  onPress={() => onLoadHealthData(false)}
+                  disabled={!canUseHealth || healthLoading}
+                >
+                  <Text style={styles.healthActionText}>读取真实数据</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.healthActionButton, styles.healthActionButtonSecondary, (!canUseHealth || healthLoading) && styles.buttonDisabled]}
+                  onPress={() => onLoadHealthData(true)}
+                  disabled={!canUseHealth || healthLoading}
+                >
+                  <Text style={styles.healthActionText}>读取 Mock 数据</Text>
+                </Pressable>
+              </View>
+
+              {healthSnapshot ? (
+                <View style={styles.healthResultBox}>
+                  <Text style={styles.healthResultText}>
+                    数据源：{healthSnapshot.source === 'healthkit' ? 'HealthKit' : 'Mock'}
+                  </Text>
+                  <Text style={styles.healthResultText}>
+                    授权状态：{healthSnapshot.authorized ? '已授权' : '未授权'}
+                  </Text>
+                  <Text style={styles.healthResultText}>
+                    今日步数：{displaySteps ?? '--'}
+                  </Text>
+                  <Text style={styles.healthResultText}>
+                    最新心率：{displayHeartRate ?? '--'} bpm
+                  </Text>
+                  <Text style={styles.healthResultText}>
+                    睡眠时长：{displaySleepMinutes ?? '--'} 分钟
+                  </Text>
+                  <Text style={styles.healthResultText}>
+                    血氧：{displayOxygen ?? '--'} %
+                  </Text>
+                  <Text style={styles.healthResultText}>
+                    血糖：{displayGlucose ?? '--'} mg/dL
+                  </Text>
+                  <Text style={styles.healthResultText}>
+                    日照时间：{displayDaylight ?? '--'} 分钟
+                  </Text>
+                  <Text style={styles.healthResultText}>
+                    运动记录数：{displayWorkoutCount ?? '--'}
+                  </Text>
+                  {healthAuthorized !== null ? (
+                    <Text style={styles.healthResultText}>
+                      一键授权：{healthAuthorized ? '成功' : '失败'}
+                    </Text>
+                  ) : null}
+                  {healthSnapshot.note ? (
+                    <Text style={styles.healthResultText}>备注：{healthSnapshot.note}</Text>
+                  ) : null}
+                </View>
+              ) : null}
+
+              {healthError ? <Text style={styles.healthError}>{healthError}</Text> : null}
+            </View>
           </View>
         </View>
       </KeyboardAvoidingView>
@@ -464,6 +636,61 @@ const styles = StyleSheet.create({
     color: '#8e7659',
     fontSize: 12,
     textAlign: 'center',
+  },
+  healthPanel: {
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(94, 62, 32, 0.16)',
+  },
+  healthTitle: {
+    color: '#5f4227',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  healthLockedHint: {
+    marginTop: 8,
+    color: '#8e7659',
+    fontSize: 12,
+  },
+  healthActionRow: {
+    marginTop: 8,
+    flexDirection: 'row',
+    gap: 8,
+  },
+  healthActionButton: {
+    flex: 1,
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#b13c2f',
+  },
+  healthActionButtonSecondary: {
+    backgroundColor: '#9b7350',
+  },
+  healthActionText: {
+    color: '#fff5ef',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  healthResultBox: {
+    marginTop: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#d8c4a7',
+    backgroundColor: '#fffdf8',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  healthResultText: {
+    color: '#5b452f',
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  healthError: {
+    marginTop: 8,
+    color: '#a7342d',
+    fontSize: 12,
   },
 });
 

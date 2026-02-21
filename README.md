@@ -7,7 +7,7 @@ QiAIchemy = **Qi** (中医“气”) + **AI** + **Alchemy**（炼化/转化）�
 
 - 本项目为 **中国传媒大学 苏梦榆** 本科毕业设计。  
 - 项目性质：教学与研究用途，非商业项目。  
-- 作者顺序：`Mengyu Su`。
+- 作者顺序：`Mengyu Su（算法和项目开发）` Primo Pan(HealthKit Bridge搭建） 。
 
 ## 项目意义
 

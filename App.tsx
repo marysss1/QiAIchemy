@@ -17,6 +17,7 @@ import {
   loadHealthSnapshot,
   type HealthSnapshot,
 } from './src/health/healthData';
+import { HealthInsightsBoard } from './src/health/HealthInsightsBoard';
 
 type AuthMode = 'login' | 'register';
 
@@ -65,7 +66,9 @@ function localizeErrorMessage(message: string, fallbackMessage: string): string 
 async function readApiResponse<T>(response: Response): Promise<{ data: T | null; rawText: string }> {
   const rawText = await response.text();
   const contentType = response.headers.get('content-type') ?? '';
-  const looksLikeJson = contentType.includes('application/json') || /^[\s]*[\[{]/.test(rawText);
+  const firstChar = rawText.trimStart().charAt(0);
+  const looksLikeJson =
+    contentType.includes('application/json') || firstChar === '{' || firstChar === '[';
 
   if (!looksLikeJson) {
     return { data: null, rawText };
@@ -250,14 +253,6 @@ function LoginScreen(): React.JSX.Element {
     setHealthAuthorized(null);
   };
 
-  const displaySteps = healthSnapshot?.activity?.stepsToday;
-  const displayHeartRate = healthSnapshot?.heart?.latestHeartRateBpm;
-  const displaySleepMinutes = healthSnapshot?.sleep?.asleepMinutesLast36h;
-  const displayOxygen = healthSnapshot?.oxygen?.bloodOxygenPercent;
-  const displayGlucose = healthSnapshot?.metabolic?.bloodGlucoseMgDl;
-  const displayDaylight = healthSnapshot?.environment?.daylightMinutesToday;
-  const displayWorkoutCount = healthSnapshot?.workouts?.length;
-
   return (
     <View style={styles.screen}>
       <View style={styles.inkHaloTop} />
@@ -268,13 +263,7 @@ function LoginScreen(): React.JSX.Element {
         style={styles.flex}
       >
         <View
-          style={[
-            styles.content,
-            {
-              paddingTop: 30,
-              paddingBottom: 24,
-            },
-          ]}
+          style={[styles.content, styles.contentSpacing]}
         >
           <View style={styles.titleBlock}>
             <View style={styles.seal} />
@@ -430,27 +419,6 @@ function LoginScreen(): React.JSX.Element {
                   <Text style={styles.healthResultText}>
                     授权状态：{healthSnapshot.authorized ? '已授权' : '未授权'}
                   </Text>
-                  <Text style={styles.healthResultText}>
-                    今日步数：{displaySteps ?? '--'}
-                  </Text>
-                  <Text style={styles.healthResultText}>
-                    最新心率：{displayHeartRate ?? '--'} bpm
-                  </Text>
-                  <Text style={styles.healthResultText}>
-                    睡眠时长：{displaySleepMinutes ?? '--'} 分钟
-                  </Text>
-                  <Text style={styles.healthResultText}>
-                    血氧：{displayOxygen ?? '--'} %
-                  </Text>
-                  <Text style={styles.healthResultText}>
-                    血糖：{displayGlucose ?? '--'} mg/dL
-                  </Text>
-                  <Text style={styles.healthResultText}>
-                    日照时间：{displayDaylight ?? '--'} 分钟
-                  </Text>
-                  <Text style={styles.healthResultText}>
-                    运动记录数：{displayWorkoutCount ?? '--'}
-                  </Text>
                   {healthAuthorized !== null ? (
                     <Text style={styles.healthResultText}>
                       一键授权：{healthAuthorized ? '成功' : '失败'}
@@ -459,6 +427,7 @@ function LoginScreen(): React.JSX.Element {
                   {healthSnapshot.note ? (
                     <Text style={styles.healthResultText}>备注：{healthSnapshot.note}</Text>
                   ) : null}
+                  <HealthInsightsBoard snapshot={healthSnapshot} />
                 </View>
               ) : null}
 
@@ -501,6 +470,10 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 24,
     justifyContent: 'space-between',
+  },
+  contentSpacing: {
+    paddingTop: 30,
+    paddingBottom: 24,
   },
   titleBlock: {
     paddingTop: 8,

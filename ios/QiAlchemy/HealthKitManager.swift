@@ -522,6 +522,15 @@ class HealthKitManager: NSObject {
       var asleep: TimeInterval = 0
       var awake: TimeInterval = 0
 
+      var stageDurations: [String: TimeInterval] = [
+        "inBed": 0,
+        "asleepUnspecified": 0,
+        "awake": 0,
+        "asleepCore": 0,
+        "asleepDeep": 0,
+        "asleepREM": 0,
+      ]
+
       let categorySamples = (samples ?? []).compactMap { $0 as? HKCategorySample }
       categorySamples.forEach { sample in
         let duration = sample.endDate.timeIntervalSince(sample.startDate)
@@ -536,13 +545,43 @@ class HealthKitManager: NSObject {
         } else if self.isSleepAwake(sample.value) {
           awake += duration
         }
+
+        let stage = self.sleepStageName(sample.value)
+        if stageDurations[stage] != nil {
+          stageDurations[stage, default: 0] += duration
+        }
       }
+
+      let stageMinutes: [String: Any] = [
+        "inBedMinutes": Self.round((stageDurations["inBed"] ?? 0) / 60),
+        "asleepUnspecifiedMinutes": Self.round((stageDurations["asleepUnspecified"] ?? 0) / 60),
+        "awakeMinutes": Self.round((stageDurations["awake"] ?? 0) / 60),
+        "asleepCoreMinutes": Self.round((stageDurations["asleepCore"] ?? 0) / 60),
+        "asleepDeepMinutes": Self.round((stageDurations["asleepDeep"] ?? 0) / 60),
+        "asleepREMMinutes": Self.round((stageDurations["asleepREM"] ?? 0) / 60),
+      ]
+
+      let sleepSamples = categorySamples
+        .sorted { $0.startDate < $1.startDate }
+        .map { sample -> [String: Any] in
+          let source = sample.sourceRevision.source
+          return [
+            "value": sample.value,
+            "stage": self.sleepStageName(sample.value),
+            "startDate": Self.isoString(from: sample.startDate),
+            "endDate": Self.isoString(from: sample.endDate),
+            "sourceName": source.name,
+            "sourceBundleId": source.bundleIdentifier,
+          ]
+        }
 
       completion([
         "inBedMinutesLast36h": Self.round(inBed / 60),
         "asleepMinutesLast36h": Self.round(asleep / 60),
         "awakeMinutesLast36h": Self.round(awake / 60),
         "sampleCountLast36h": categorySamples.count,
+        "stageMinutesLast36h": stageMinutes,
+        "samplesLast36h": sleepSamples,
       ], nil)
     }
 
@@ -609,18 +648,14 @@ class HealthKitManager: NSObject {
   }
 
   private func isSleepAsleep(_ value: Int) -> Bool {
-    if value == HKCategoryValueSleepAnalysis.asleep.rawValue {
-      return true
-    }
-
     if #available(iOS 16.0, *) {
-      return value == HKCategoryValueSleepAnalysis.asleepCore.rawValue
+      return value == HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue
+        || value == HKCategoryValueSleepAnalysis.asleepCore.rawValue
         || value == HKCategoryValueSleepAnalysis.asleepDeep.rawValue
         || value == HKCategoryValueSleepAnalysis.asleepREM.rawValue
-        || value == HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue
+    } else {
+      return value == HKCategoryValueSleepAnalysis.asleep.rawValue
     }
-
-    return false
   }
 
   private func isSleepAwake(_ value: Int) -> Bool {
@@ -628,6 +663,35 @@ class HealthKitManager: NSObject {
       return value == HKCategoryValueSleepAnalysis.awake.rawValue
     }
     return false
+  }
+
+  private func sleepStageName(_ value: Int) -> String {
+    if value == HKCategoryValueSleepAnalysis.inBed.rawValue {
+      return "inBed"
+    }
+
+    if #available(iOS 16.0, *) {
+      switch value {
+      case HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue:
+        return "asleepUnspecified"
+      case HKCategoryValueSleepAnalysis.awake.rawValue:
+        return "awake"
+      case HKCategoryValueSleepAnalysis.asleepCore.rawValue:
+        return "asleepCore"
+      case HKCategoryValueSleepAnalysis.asleepDeep.rawValue:
+        return "asleepDeep"
+      case HKCategoryValueSleepAnalysis.asleepREM.rawValue:
+        return "asleepREM"
+      default:
+        return "unknown"
+      }
+    }
+
+    if value == HKCategoryValueSleepAnalysis.asleep.rawValue {
+      return "asleepUnspecified"
+    }
+
+    return "unknown"
   }
 
   private func workoutTypeName(_ type: HKWorkoutActivityType) -> String {

@@ -459,20 +459,23 @@ function buildMockOxygenData(now: Date): HealthOxygenData {
 function buildMockMetabolicData(now: Date): HealthMetabolicData {
   const points: HealthTrendPoint[] = [];
   for (let day = 6; day >= 0; day -= 1) {
+    const fastingMmol = randomFloat(4.3, 6.2, 1);
+    const eveningMmol = randomFloat(5.2, 10.8, 1);
     points.push({
       timestamp: isoDayOffset(now, -day, 7, randomInt(0, 40)),
-      value: randomFloat(82, 102, 1),
-      unit: 'mg/dL',
+      value: fastingMmol,
+      unit: 'mmol/L',
     });
     points.push({
       timestamp: isoDayOffset(now, -day, 20, randomInt(0, 40)),
-      value: randomFloat(90, 132, 1),
-      unit: 'mg/dL',
+      value: eveningMmol,
+      unit: 'mmol/L',
     });
   }
 
+  const latestMmol = points[points.length - 1]?.value;
   return {
-    bloodGlucoseMgDl: points[points.length - 1]?.value,
+    bloodGlucoseMgDl: latestMmol ? round(latestMmol * 18, 1) : undefined,
     bloodGlucoseSeriesLast7d: points,
   };
 }

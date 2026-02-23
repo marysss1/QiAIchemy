@@ -201,6 +201,17 @@ class HealthKitManager: NSObject {
       dispatchGroup.leave()
     }
 
+    if #available(iOS 18.0, *) {
+      dispatchGroup.enter()
+      querySleepApneaSummaryLast30Days { summary, error in
+        setErrorIfNeeded(error)
+        mergeSection(section: "sleep", values: summary)
+        dispatchGroup.leave()
+      }
+    } else {
+      appendNote("sleepApneaEvent requires iOS 18+")
+    }
+
     runLatestQuantity(
       .heartRate,
       unit: HKUnit.count().unitDivided(by: HKUnit.minute()),
@@ -373,10 +384,16 @@ class HealthKitManager: NSObject {
       }
     }
 
-    let categoryIdentifiers: [HKCategoryTypeIdentifier] = [
+    var categoryIdentifiers: [HKCategoryTypeIdentifier] = [
       .sleepAnalysis,
       .appleStandHour,
     ]
+
+    if #available(iOS 18.0, *) {
+      categoryIdentifiers.append(
+        HKCategoryTypeIdentifier(rawValue: "HKCategoryTypeIdentifierSleepApneaEvent")
+      )
+    }
 
     categoryIdentifiers.forEach { identifier in
       if let type = HKObjectType.categoryType(forIdentifier: identifier) {
@@ -588,6 +605,67 @@ class HealthKitManager: NSObject {
     healthStore.execute(query)
   }
 
+  private func querySleepApneaSummaryLast30Days(completion: @escaping ([String: Any]?, Error?) -> Void) {
+    if #available(iOS 18.0, *) {
+      let apneaIdentifier = HKCategoryTypeIdentifier(
+        rawValue: "HKCategoryTypeIdentifierSleepApneaEvent"
+      )
+      guard let type = HKObjectType.categoryType(forIdentifier: apneaIdentifier) else {
+        completion(nil, nil)
+        return
+      }
+
+      let now = Date()
+      guard let start = Calendar.current.date(byAdding: .day, value: -30, to: now) else {
+        completion(nil, nil)
+        return
+      }
+
+      let predicate = HKQuery.predicateForSamples(
+        withStart: start,
+        end: now,
+        options: .strictStartDate
+      )
+      let sort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+      let query = HKSampleQuery(
+        sampleType: type,
+        predicate: predicate,
+        limit: HKObjectQueryNoLimit,
+        sortDescriptors: [sort]
+      ) { _, samples, error in
+        if let error {
+          completion(nil, error)
+          return
+        }
+
+        let categorySamples = (samples ?? []).compactMap { $0 as? HKCategorySample }
+        let eventCount = categorySamples.count
+        let totalMinutes = categorySamples.reduce(0.0) { partial, sample in
+          partial + max(sample.endDate.timeIntervalSince(sample.startDate), 0) / 60.0
+        }
+        let riskLevel = self.apneaRiskLevel(eventCount: eventCount, totalMinutes: totalMinutes)
+
+        var apnea: [String: Any] = [
+          "eventCountLast30d": eventCount,
+          "durationMinutesLast30d": Self.round(totalMinutes),
+          "riskLevel": riskLevel,
+          "reminder": self.apneaReminderText(riskLevel: riskLevel, eventCount: eventCount),
+        ]
+        if let latest = categorySamples.first?.endDate {
+          apnea["latestEventAt"] = Self.isoString(from: latest)
+        }
+
+        completion([
+          "apnea": apnea,
+        ], nil)
+      }
+
+      healthStore.execute(query)
+    } else {
+      completion(nil, nil)
+    }
+  }
+
   private func queryRecentWorkouts(
     days: Int,
     limit: Int,
@@ -692,6 +770,27 @@ class HealthKitManager: NSObject {
     }
 
     return "unknown"
+  }
+
+  private func apneaRiskLevel(eventCount: Int, totalMinutes: Double) -> String {
+    if eventCount == 0 {
+      return "none"
+    }
+    if eventCount <= 2 && totalMinutes < 20 {
+      return "watch"
+    }
+    return "high"
+  }
+
+  private func apneaReminderText(riskLevel: String, eventCount: Int) -> String {
+    switch riskLevel {
+    case "none":
+      return "近30天未检测到睡眠呼吸暂停事件；若有打鼾、晨起头痛或白天嗜睡，建议持续观察。"
+    case "watch":
+      return "近30天检测到 \(eventCount) 次睡眠呼吸暂停事件，建议规律作息并持续追踪。"
+    default:
+      return "近30天检测到 \(eventCount) 次睡眠呼吸暂停事件，建议到睡眠专科进一步评估。"
+    }
   }
 
   private func workoutTypeName(_ type: HKWorkoutActivityType) -> String {

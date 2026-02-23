@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -27,6 +27,7 @@ type EditorMode = 'name' | 'password';
 
 type AuthUser = {
   id: string;
+  username?: string;
   name?: string;
   email: string;
 };
@@ -34,14 +35,19 @@ type AuthUser = {
 const API_BASE_URL = 'http://127.0.0.1:2818';
 const API_ERROR_MESSAGE_MAP: Record<string, string> = {
   'Email already registered': '邮箱已被注册',
+  'Username already registered': '用户名已被占用',
   'Invalid email or password': '邮箱或密码错误',
+  'Invalid username or email or password': '用户名/邮箱或密码错误',
+  'Invalid username format': '用户名格式不合法',
   Unauthorized: '未授权，请重新登录',
   'Route not found': '接口不存在',
   'Validation failed': '请求参数不合法',
+  'login or email is required': '请输入用户名或邮箱',
 };
 
 const AVATAR_BG_COLORS = ['#a7342d', '#8a5d3b', '#7a4f2e', '#9c3a31', '#6c4d2f', '#8d6a45'];
 const AVATAR_BORDER_COLORS = ['#c89f74', '#b78d65', '#c39768', '#c88b79', '#b98f62', '#c6a57e'];
+const USERNAME_REGEX = /^[a-z0-9_][a-z0-9_.-]{2,23}$/;
 
 function localizeErrorMessage(message: string, fallbackMessage: string): string {
   const trimmedMessage = message.trim();
@@ -163,7 +169,7 @@ function SnapshotRawPanel({ snapshot }: { snapshot: HealthSnapshot }): React.JSX
     {
       label: '睡眠样本',
       value: `${snapshot.sleep?.samplesLast36h?.length ?? 0}`,
-      note: `分期统计: Core ${formatMetric(snapshot.sleep?.stageMinutesLast36h?.asleepCoreMinutes)} min, Deep ${formatMetric(snapshot.sleep?.stageMinutesLast36h?.asleepDeepMinutes)} min, REM ${formatMetric(snapshot.sleep?.stageMinutesLast36h?.asleepREMMinutes)} min`,
+      note: `分期统计: Core ${formatMetric(snapshot.sleep?.stageMinutesLast36h?.asleepCoreMinutes)} min, Deep ${formatMetric(snapshot.sleep?.stageMinutesLast36h?.asleepDeepMinutes)} min, REM ${formatMetric(snapshot.sleep?.stageMinutesLast36h?.asleepREMMinutes)} min, Apnea ${formatMetric(snapshot.sleep?.apnea?.eventCountLast30d)} 次`,
     },
     {
       label: '心率趋势点',
@@ -173,7 +179,7 @@ function SnapshotRawPanel({ snapshot }: { snapshot: HealthSnapshot }): React.JSX
     {
       label: '血氧趋势点',
       value: `${snapshot.oxygen?.bloodOxygenSeriesLast24h?.length ?? 0}`,
-      note: `最新血氧: ${formatMetric(snapshot.oxygen?.bloodOxygenPercent, 1)} %`,
+      note: `最新血氧: ${formatMetric(snapshot.oxygen?.bloodOxygenPercent, 0)} %`,
     },
     {
       label: '代谢趋势点',
@@ -238,10 +244,15 @@ function App(): React.JSX.Element {
 
 function LoginScreen(): React.JSX.Element {
   const [mode, setMode] = useState<AuthMode>('login');
+  const [loginId, setLoginId] = useState('');
+  const [username, setUsername] = useState('');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [usernameChecking, setUsernameChecking] = useState(false);
+  const [usernameAvailable, setUsernameAvailable] = useState<boolean | null>(null);
+  const [usernameHint, setUsernameHint] = useState('');
   const [token, setToken] = useState('');
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(false);
@@ -262,21 +273,135 @@ function LoginScreen(): React.JSX.Element {
   const canUseHealth = Boolean(token);
 
   const avatar = useMemo(() => buildAvatar(currentUser, avatarSeed), [currentUser, avatarSeed]);
+  const normalizedUsername = username.trim().toLowerCase();
+  const normalizedLoginId = loginId.trim();
+  const normalizedEmail = email.trim().toLowerCase();
+  const registerBlocked =
+    mode === 'register' &&
+    (usernameChecking ||
+      usernameAvailable === false ||
+      (normalizedUsername.length > 0 && !USERNAME_REGEX.test(normalizedUsername)));
+
+  const checkUsernameAvailable = async (
+    rawUsername: string
+  ): Promise<{ available: boolean; message?: string }> => {
+    const normalized = rawUsername.trim().toLowerCase();
+
+    if (!USERNAME_REGEX.test(normalized)) {
+      return {
+        available: false,
+        message: '用户名需为 3-24 位小写字母/数字，可包含 _ . -',
+      };
+    }
+
+    const normalizedBase = API_BASE_URL.replace(/\/+$/, '');
+    const response = await fetch(
+      `${normalizedBase}/api/auth/username-available?username=${encodeURIComponent(normalized)}`
+    );
+    const { data } = await readApiResponse<{ available?: boolean; message?: string }>(response);
+
+    if (!response.ok || typeof data?.available !== 'boolean') {
+      const fallbackMessage =
+        response.status >= 500
+          ? `服务暂时不可用（HTTP ${response.status}）`
+          : `用户名校验失败（HTTP ${response.status}）`;
+      throw new Error(localizeErrorMessage(data?.message ?? '', fallbackMessage));
+    }
+
+    return { available: data.available };
+  };
+
+  useEffect(() => {
+    if (mode !== 'register') {
+      setUsernameChecking(false);
+      setUsernameAvailable(null);
+      setUsernameHint('');
+      return;
+    }
+
+    if (!normalizedUsername) {
+      setUsernameChecking(false);
+      setUsernameAvailable(null);
+      setUsernameHint('');
+      return;
+    }
+
+    if (!USERNAME_REGEX.test(normalizedUsername)) {
+      setUsernameChecking(false);
+      setUsernameAvailable(false);
+      setUsernameHint('用户名需为 3-24 位小写字母/数字，可包含 _ . -');
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setUsernameChecking(true);
+      try {
+        const result = await checkUsernameAvailable(normalizedUsername);
+        if (cancelled) {
+          return;
+        }
+        setUsernameAvailable(result.available);
+        setUsernameHint(result.available ? '用户名可用' : '用户名已被占用');
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const rawMessage = error instanceof Error ? error.message : '';
+        setUsernameAvailable(null);
+        setUsernameHint(localizeErrorMessage(rawMessage, '用户名校验失败'));
+      } finally {
+        if (!cancelled) {
+          setUsernameChecking(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [mode, normalizedUsername]);
 
   const onSubmit = async () => {
     const normalizedBase = API_BASE_URL.replace(/\/+$/, '');
 
-    if (!email.trim() || !password.trim()) {
-      Alert.alert('提示', '邮箱和密码不能为空');
+    if (!password.trim()) {
+      Alert.alert('提示', '密码不能为空');
       return;
     }
 
-    if (mode === 'register' && !name.trim()) {
-      Alert.alert('提示', '注册模式下请填写昵称');
+    if (mode === 'login' && !normalizedLoginId) {
+      Alert.alert('提示', '用户名或邮箱不能为空');
       return;
     }
 
-    if (mode === 'register' && password.trim().length < 8) {
+    if (mode === 'register' && !normalizedUsername) {
+      Alert.alert('提示', '注册模式下请填写用户名');
+      return;
+    }
+
+    if (mode === 'register' && !normalizedEmail) {
+      Alert.alert('提示', '注册模式下请填写邮箱');
+      return;
+    }
+
+    if (mode === 'register' && !USERNAME_REGEX.test(normalizedUsername)) {
+      Alert.alert('提示', '用户名需为 3-24 位小写字母/数字，可包含 _ . -');
+      return;
+    }
+
+    if (mode === 'register' && usernameChecking) {
+      Alert.alert('提示', '正在校验用户名，请稍候');
+      return;
+    }
+
+    if (mode === 'register' && usernameAvailable === false) {
+      Alert.alert('提示', '用户名已被占用，请更换');
+      return;
+    }
+
+    if (password.trim().length < 8) {
       Alert.alert('提示', '密码至少8位');
       return;
     }
@@ -289,10 +414,22 @@ function LoginScreen(): React.JSX.Element {
     setLoading(true);
     try {
       const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
-      const body =
-        mode === 'login'
-          ? { email: email.trim(), password: password.trim() }
-          : { name: name.trim(), email: email.trim(), password: password.trim() };
+
+      let body: Record<string, string>;
+      if (mode === 'login') {
+        body = { login: normalizedLoginId, password: password.trim() };
+      } else {
+        const latestUsernameCheck = await checkUsernameAvailable(normalizedUsername);
+        if (!latestUsernameCheck.available) {
+          throw new Error('用户名已被占用');
+        }
+        body = {
+          username: normalizedUsername,
+          email: normalizedEmail,
+          password: password.trim(),
+          ...(name.trim() ? { name: name.trim() } : {}),
+        };
+      }
 
       const response = await fetch(`${normalizedBase}${endpoint}`, {
         method: 'POST',
@@ -320,6 +457,9 @@ function LoginScreen(): React.JSX.Element {
 
       setPassword('');
       setConfirmPassword('');
+      setLoginId('');
+      setUsername('');
+      setEmail('');
       setTestMode(false);
       setHealthSnapshot(null);
       setHealthError('');
@@ -418,8 +558,15 @@ function LoginScreen(): React.JSX.Element {
   const onLogout = () => {
     setToken('');
     setCurrentUser(null);
+    setLoginId('');
+    setUsername('');
+    setEmail('');
+    setName('');
     setPassword('');
     setConfirmPassword('');
+    setUsernameChecking(false);
+    setUsernameAvailable(null);
+    setUsernameHint('');
     setHealthSnapshot(null);
     setHealthError('');
     setHealthAuthorized(null);
@@ -496,6 +643,7 @@ function LoginScreen(): React.JSX.Element {
               />
               <View style={styles.profilePanel}>
                 <Text style={styles.profilePanelTitle}>用户中心</Text>
+                <Text style={styles.profilePanelMeta}>用户名：{currentUser?.username ?? '--'}</Text>
                 <Text style={styles.profilePanelMeta}>{currentUser?.email ?? '--'}</Text>
                 <Pressable style={styles.profileItemButton} onPress={openNicknameEditor}>
                   <Text style={styles.profileItemText}>更改昵称</Text>
@@ -535,21 +683,67 @@ function LoginScreen(): React.JSX.Element {
                   onPress={() => {
                     setMode('login');
                     setConfirmPassword('');
+                    setUsernameChecking(false);
+                    setUsernameAvailable(null);
+                    setUsernameHint('');
                   }}
                 >
                   <Text style={[styles.tabText, mode === 'login' && styles.tabTextActive]}>登录</Text>
                 </Pressable>
                 <Pressable
                   style={[styles.tabButton, mode === 'register' && styles.tabButtonActive]}
-                  onPress={() => setMode('register')}
+                  onPress={() => {
+                    setMode('register');
+                    setLoginId('');
+                  }}
                 >
                   <Text style={[styles.tabText, mode === 'register' && styles.tabTextActive]}>注册</Text>
                 </Pressable>
               </View>
 
-              {mode === 'register' ? (
+              {mode === 'login' ? (
                 <>
-                  <Text style={styles.label}>昵称</Text>
+                  <Text style={styles.label}>账号</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    placeholder="请输入用户名或邮箱"
+                    placeholderTextColor="#99866b"
+                    style={styles.input}
+                    value={loginId}
+                    onChangeText={setLoginId}
+                  />
+                </>
+              ) : (
+                <>
+                  <Text style={styles.label}>用户名</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    placeholder="请输入用户名（3-24位）"
+                    placeholderTextColor="#99866b"
+                    style={styles.input}
+                    value={username}
+                    onChangeText={setUsername}
+                  />
+                  {usernameChecking ? (
+                    <Text style={styles.usernameHint}>正在校验用户名...</Text>
+                  ) : usernameHint ? (
+                    <Text
+                      style={[
+                        styles.usernameHint,
+                        usernameAvailable === true
+                          ? styles.usernameHintSuccess
+                          : styles.usernameHintError,
+                      ]}
+                    >
+                      {usernameHint}
+                    </Text>
+                  ) : (
+                    <Text style={styles.usernameHint}>
+                      用户名仅支持小写字母、数字和 `_.-` 组合
+                    </Text>
+                  )}
+
+                  <Text style={styles.label}>昵称（可选）</Text>
                   <TextInput
                     autoCapitalize="none"
                     placeholder="请输入昵称"
@@ -558,19 +752,19 @@ function LoginScreen(): React.JSX.Element {
                     value={name}
                     onChangeText={setName}
                   />
-                </>
-              ) : null}
 
-              <Text style={styles.label}>邮箱</Text>
-              <TextInput
-                autoCapitalize="none"
-                keyboardType="email-address"
-                placeholder="请输入邮箱地址"
-                placeholderTextColor="#99866b"
-                style={styles.input}
-                value={email}
-                onChangeText={setEmail}
-              />
+                  <Text style={styles.label}>邮箱</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                    placeholder="请输入邮箱地址"
+                    placeholderTextColor="#99866b"
+                    style={styles.input}
+                    value={email}
+                    onChangeText={setEmail}
+                  />
+                </>
+              )}
 
               <Text style={styles.label}>密码</Text>
               <TextInput
@@ -608,7 +802,11 @@ function LoginScreen(): React.JSX.Element {
                 </>
               ) : null}
 
-              <Pressable style={[styles.button, loading && styles.buttonDisabled]} onPress={onSubmit} disabled={loading}>
+              <Pressable
+                style={[styles.button, (loading || registerBlocked) && styles.buttonDisabled]}
+                onPress={onSubmit}
+                disabled={loading || registerBlocked}
+              >
                 {loading ? (
                   <ActivityIndicator color="#fff5ef" />
                 ) : (
@@ -849,6 +1047,22 @@ const styles = StyleSheet.create({
     color: '#2f2115',
     marginBottom: 16,
     backgroundColor: '#fffdf8',
+  },
+  usernameHint: {
+    marginTop: -10,
+    marginBottom: 14,
+    marginLeft: 2,
+    color: '#8e7659',
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  usernameHintSuccess: {
+    color: '#2f7a45',
+    fontWeight: '600',
+  },
+  usernameHintError: {
+    color: '#9e3328',
+    fontWeight: '600',
   },
   button: {
     marginTop: 4,

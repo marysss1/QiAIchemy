@@ -37,7 +37,8 @@ type RingSpec = {
   color: string;
   trackColor: string;
   radius: number;
-  dotSize: number;
+  segmentLength: number;
+  segmentThickness: number;
 };
 
 const ASLEEP_STAGES: Set<HealthSleepStageOrUnknown> = new Set([
@@ -65,11 +66,57 @@ function toLocalTime(value: string): string {
   });
 }
 
+function toLocalDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '--';
+  }
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function mgDlToMmolL(value: number | undefined): number | undefined {
   if (value === undefined || Number.isNaN(value)) {
     return undefined;
   }
   return value / 18;
+}
+
+function sleepApneaRiskViewModel(riskLevel: string | undefined): {
+  label: string;
+  textColor: string;
+  bgColor: string;
+} {
+  if (riskLevel === 'high') {
+    return {
+      label: '高风险提示',
+      textColor: '#9a2f24',
+      bgColor: '#f8e0da',
+    };
+  }
+  if (riskLevel === 'watch') {
+    return {
+      label: '关注提示',
+      textColor: '#8a5b1e',
+      bgColor: '#faecd4',
+    };
+  }
+  if (riskLevel === 'none') {
+    return {
+      label: '未见异常',
+      textColor: '#2d6f43',
+      bgColor: '#e5f2e9',
+    };
+  }
+  return {
+    label: '数据待完善',
+    textColor: '#6d543a',
+    bgColor: '#f2eadf',
+  };
 }
 
 function glucoseStatusText(mmolL: number | undefined): string {
@@ -204,8 +251,8 @@ function SegmentedRing({
       {Array.from({ length: segments }, (_, index) => {
         const angleDeg = -90 + (index * 360) / segments;
         const angle = (angleDeg * Math.PI) / 180;
-        const x = center + spec.radius * Math.cos(angle) - spec.dotSize / 2;
-        const y = center + spec.radius * Math.sin(angle) - spec.dotSize / 2;
+        const x = center + spec.radius * Math.cos(angle) - spec.segmentLength / 2;
+        const y = center + spec.radius * Math.sin(angle) - spec.segmentThickness / 2;
 
         return (
           <View
@@ -215,9 +262,10 @@ function SegmentedRing({
               {
                 left: x,
                 top: y,
-                width: spec.dotSize,
-                height: spec.dotSize,
-                borderRadius: spec.dotSize / 2,
+                width: spec.segmentLength,
+                height: spec.segmentThickness,
+                borderRadius: spec.segmentThickness / 2,
+                transform: [{ rotate: `${angleDeg + 90}deg` }],
                 backgroundColor: index < filled ? spec.color : spec.trackColor,
               },
             ]}
@@ -237,9 +285,9 @@ function TaijiRings({
   exerciseMin: number;
   standHours: number;
 }) {
-  const size = 212;
+  const size = 228;
   const center = size / 2;
-  const segments = 72;
+  const segments = 80;
 
   const ringSpecs: RingSpec[] = [
     {
@@ -249,18 +297,20 @@ function TaijiRings({
       unit: 'kcal',
       color: '#b53f33',
       trackColor: '#ead2c5',
-      radius: 86,
-      dotSize: 7,
+      radius: 92,
+      segmentLength: 8,
+      segmentThickness: 4,
     },
     {
       label: '强身环',
       value: exerciseMin,
       target: 45,
       unit: 'min',
-      color: '#c48f55',
+      color: '#bc7d42',
       trackColor: '#efe0cd',
-      radius: 64,
-      dotSize: 6,
+      radius: 72,
+      segmentLength: 7,
+      segmentThickness: 4,
     },
     {
       label: '立身环',
@@ -269,21 +319,31 @@ function TaijiRings({
       unit: 'h',
       color: '#6f5339',
       trackColor: '#e8dccf',
-      radius: 44,
-      dotSize: 5,
+      radius: 52,
+      segmentLength: 6,
+      segmentThickness: 3,
     },
   ];
 
   return (
     <View style={styles.taijiWrap}>
-      <View style={[styles.taijiRingBoard, { width: size, height: size }]}> 
+      <View style={[styles.taijiRingBoard, { width: size, height: size }]}>
+        <View style={styles.taijiBackdropOuter} />
+        <View style={styles.taijiBackdropInner} />
         {ringSpecs.map(spec => (
           <SegmentedRing key={spec.label} center={center} segments={segments} spec={spec} />
         ))}
 
         <View style={styles.taijiCenterCircle}>
-          <Text style={styles.taijiSymbol}>☯</Text>
-          <Text style={styles.taijiCenterLabel}>太极活力环</Text>
+          <View style={styles.taijiCore}>
+            <View style={styles.taijiTopHalf} />
+            <View style={styles.taijiBottomHalf} />
+            <View style={styles.taijiTopBulge} />
+            <View style={styles.taijiBottomBulge} />
+            <View style={styles.taijiTopEye} />
+            <View style={styles.taijiBottomEye} />
+          </View>
+          <Text style={styles.taijiCenterLabel}>阴阳平衡</Text>
         </View>
       </View>
 
@@ -353,11 +413,11 @@ function MiniBarsInteractive({
   }
 
   const safeIndex = Math.min(selectedIndex, validPoints.length - 1);
-  const selected = validPoints[safeIndex];
   const maxValue = Math.max(...validPoints.map(point => point.displayValue), 1);
   const minValue = Math.min(...validPoints.map(point => point.displayValue));
   const rangeValue = Math.max(maxValue - minValue, 1);
-  const maxHeight = 48;
+  const maxHeight = 66;
+  const minHeight = 10;
 
   return (
     <View style={styles.chartSection}>
@@ -369,16 +429,30 @@ function MiniBarsInteractive({
               const ratio = point.displayValue / maxValue;
               const varianceRatio = (point.displayValue - minValue) / rangeValue;
               const height = Math.min(
-                Math.max(maxHeight * (0.65 * ratio + 0.35 * varianceRatio), 8),
+                Math.max(maxHeight * (0.65 * ratio + 0.35 * varianceRatio), minHeight),
                 maxHeight
               );
               const active = index === safeIndex;
+              const markerBottom = Math.min(height + 7, maxHeight + 2);
+              const markerAlignStyle =
+                index === 0
+                  ? styles.miniBarMarkerFirst
+                  : index === validPoints.length - 1
+                    ? styles.miniBarMarkerLast
+                    : styles.miniBarMarkerCenter;
               return (
                 <Pressable
                   key={`${point.timestamp}-${index}`}
                   style={styles.miniBarPressArea}
                   onPress={() => setSelectedIndex(index)}
                 >
+                  {active ? (
+                    <View style={[styles.miniBarMarker, markerAlignStyle, { bottom: markerBottom }]}>
+                      <Text style={styles.miniBarMarkerText} numberOfLines={1}>
+                        {fmt(point.displayValue, valueDigits)} {unitLabel}
+                      </Text>
+                    </View>
+                  ) : null}
                   <View
                     style={[
                       styles.miniBar,
@@ -395,12 +469,7 @@ function MiniBarsInteractive({
           </View>
         </View>
       </View>
-      <View style={styles.chartDetailPill}>
-        <View style={[styles.chartDetailDot, { backgroundColor: color }]} />
-        <Text style={styles.chartDetailText}>
-          {toLocalTime(selected.timestamp)} · {fmt(selected.displayValue, valueDigits)} {unitLabel}
-        </Text>
-      </View>
+      <Text style={styles.chartTimeHint}>选中时间：{toLocalTime(validPoints[safeIndex].timestamp)}</Text>
     </View>
   );
 }
@@ -426,6 +495,8 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
   const sleepWindowLabel = mainSleepBlock
     ? `${toLocalTime(mainSleepBlock.startDate)} - ${toLocalTime(mainSleepBlock.endDate)}`
     : '--';
+  const apnea = snapshot.sleep?.apnea;
+  const apneaRisk = sleepApneaRiskViewModel(apnea?.riskLevel);
 
   const heartTrend = (snapshot.heart?.heartRateSeriesLast24h ?? [])
     .filter(point => point.value > 0)
@@ -504,6 +575,27 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
             <Text style={styles.metricValue}>{fmt(snapshot.sleep?.sleepScore)}</Text>
           </View>
         </View>
+
+        <View style={styles.apneaCard}>
+          <View style={styles.apneaHeaderRow}>
+            <Text style={styles.apneaTitle}>睡眠呼吸暂停提醒</Text>
+            <View style={[styles.apneaBadge, { backgroundColor: apneaRisk.bgColor }]}>
+              <Text style={[styles.apneaBadgeText, { color: apneaRisk.textColor }]}>{apneaRisk.label}</Text>
+            </View>
+          </View>
+          <Text style={styles.apneaMeta}>
+            近30天事件：{fmt(apnea?.eventCountLast30d)} 次 · 累计时长：
+            {fmt(apnea?.durationMinutesLast30d, 1)} 分钟
+          </Text>
+          <Text style={styles.apneaMeta}>
+            最近一次：{apnea?.latestEventAt ? toLocalDateTime(apnea.latestEventAt) : '--'}
+          </Text>
+          <Text style={styles.apneaReminderText}>
+            {apnea?.reminder ??
+              '暂无睡眠呼吸暂停事件记录。若长期打鼾、晨起头痛或白天嗜睡，建议咨询医生。'}
+          </Text>
+          <Text style={styles.apneaDisclaimer}>本提醒仅用于健康管理，不构成医疗诊断。</Text>
+        </View>
       </View>
 
       <View style={styles.section}>
@@ -531,7 +623,7 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
           </View>
           <View style={styles.metricTile}>
             <Text style={styles.metricTileLabel}>血氧</Text>
-            <Text style={styles.metricTileValue}>{fmt(snapshot.oxygen?.bloodOxygenPercent, 1)} %</Text>
+            <Text style={styles.metricTileValue}>{fmt(snapshot.oxygen?.bloodOxygenPercent, 0)} %</Text>
           </View>
           <View style={styles.metricTile}>
             <Text style={styles.metricTileLabel}>血糖（mmol/L）</Text>
@@ -540,9 +632,21 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
           </View>
         </View>
 
-        <MiniBarsInteractive title="近 12 小时心率波动（可点选）" points={heartTrend} color="#7a5b3e" unitLabel="bpm" valueDigits={0} />
+        <MiniBarsInteractive
+          title="近 12 小时心率波动（可点选）"
+          points={heartTrend}
+          color="#7a5b3e"
+          unitLabel="bpm"
+          valueDigits={0}
+        />
 
-        <MiniBarsInteractive title="近 12 小时血氧波动（可点选）" points={oxygenTrend} color="#c48f55" unitLabel="%" valueDigits={1} />
+        <MiniBarsInteractive
+          title="近 12 小时血氧波动（可点选）"
+          points={oxygenTrend}
+          color="#c48f55"
+          unitLabel="%"
+          valueDigits={0}
+        />
       </View>
 
       <View style={styles.section}>
@@ -662,6 +766,49 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 8,
   },
+  apneaCard: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#decaac',
+    borderRadius: 10,
+    backgroundColor: '#fffaf1',
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  apneaHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  apneaTitle: {
+    color: '#5c4027',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  apneaBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  apneaBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  apneaMeta: {
+    color: '#6d543a',
+    fontSize: 11,
+  },
+  apneaReminderText: {
+    marginTop: 2,
+    color: '#5a4129',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  apneaDisclaimer: {
+    color: '#8d7458',
+    fontSize: 10,
+  },
   metricPill: {
     flex: 1,
     borderRadius: 10,
@@ -723,27 +870,28 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   miniBarsClip: {
-    height: 58,
+    height: 96,
     overflow: 'hidden',
   },
   miniBarsInner: {
-    height: 58,
+    height: 96,
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 3,
-    overflow: 'hidden',
+    paddingTop: 20,
   },
   miniBarPressArea: {
     flex: 1,
     justifyContent: 'flex-end',
     alignItems: 'center',
     height: '100%',
+    position: 'relative',
   },
   miniBar: {
-    width: '86%',
-    borderRadius: 3,
+    width: '84%',
+    borderRadius: 4,
     borderWidth: 1,
-    maxHeight: 48,
+    maxHeight: 66,
   },
   miniBarActive: {
     borderColor: '#ffffff',
@@ -751,25 +899,44 @@ const styles = StyleSheet.create({
   miniBarInactive: {
     borderColor: 'transparent',
   },
-  chartDetailPill: {
-    marginTop: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 999,
+  miniBarMarker: {
+    position: 'absolute',
     borderWidth: 1,
-    borderColor: '#d9c4a3',
-    backgroundColor: '#fff8ee',
-    flexDirection: 'row',
+    borderColor: '#ddc5a7',
+    backgroundColor: '#fff8ec',
+    minWidth: 74,
     alignItems: 'center',
-    alignSelf: 'flex-start',
-    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    zIndex: 3,
+    shadowColor: '#5b4129',
+    shadowOpacity: 0.16,
+    shadowRadius: 3,
+    shadowOffset: {
+      width: 0,
+      height: 1,
+    },
+    elevation: 2,
   },
-  chartDetailDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+  miniBarMarkerCenter: {
+    left: '50%',
+    transform: [{ translateX: -37 }],
   },
-  chartDetailText: {
+  miniBarMarkerFirst: {
+    left: 0,
+  },
+  miniBarMarkerLast: {
+    right: 0,
+  },
+  miniBarMarkerText: {
+    color: '#5f452d',
+    fontSize: 10,
+    textAlign: 'center',
+    fontWeight: '700',
+  },
+  chartTimeHint: {
+    marginTop: 6,
     color: '#6b5238',
     fontSize: 11,
   },
@@ -780,33 +947,114 @@ const styles = StyleSheet.create({
     position: 'relative',
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 106,
-    backgroundColor: '#fff8ef',
+    borderRadius: 114,
+    backgroundColor: '#fdf8ef',
     borderWidth: 1,
-    borderColor: '#dec7a8',
+    borderColor: '#ddc4a3',
+    shadowColor: '#6f5339',
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
   },
   ringDot: {
     position: 'absolute',
   },
+  taijiBackdropOuter: {
+    position: 'absolute',
+    width: 194,
+    height: 194,
+    borderRadius: 97,
+    backgroundColor: 'rgba(207, 173, 138, 0.18)',
+  },
+  taijiBackdropInner: {
+    position: 'absolute',
+    width: 138,
+    height: 138,
+    borderRadius: 69,
+    backgroundColor: '#fbf1e3',
+    borderWidth: 1,
+    borderColor: '#e1cfb5',
+  },
   taijiCenterCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 88,
+    height: 88,
+    borderRadius: 44,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: '#d8c2a1',
-    backgroundColor: '#f8ecdc',
+    borderColor: '#d6be9b',
+    backgroundColor: '#f7e9d7',
   },
-  taijiSymbol: {
-    color: '#5f4126',
-    fontSize: 24,
-    fontWeight: '700',
+  taijiCore: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    position: 'relative',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#7a5b3e',
+    backgroundColor: '#7a5b3e',
+  },
+  taijiTopHalf: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 22,
+    backgroundColor: '#efe1cc',
+  },
+  taijiBottomHalf: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 22,
+    backgroundColor: '#7a5b3e',
+  },
+  taijiTopBulge: {
+    position: 'absolute',
+    top: 0,
+    left: 11,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#7a5b3e',
+  },
+  taijiBottomBulge: {
+    position: 'absolute',
+    bottom: 0,
+    left: 11,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#efe1cc',
+  },
+  taijiTopEye: {
+    position: 'absolute',
+    top: 8,
+    left: 18,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#efe1cc',
+  },
+  taijiBottomEye: {
+    position: 'absolute',
+    bottom: 8,
+    left: 18,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#7a5b3e',
   },
   taijiCenterLabel: {
-    marginTop: 1,
-    color: '#73563a',
-    fontSize: 9,
+    marginTop: 5,
+    color: '#6f5339',
+    fontSize: 10,
+    fontWeight: '700',
   },
   taijiLegendList: {
     marginTop: 10,

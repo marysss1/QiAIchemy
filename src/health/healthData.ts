@@ -56,6 +56,16 @@ export type HealthSleepStageMinutes = {
   asleepREMMinutes?: number;
 };
 
+export type HealthSleepApneaRiskLevel = 'none' | 'watch' | 'high' | 'unknown';
+
+export type HealthSleepApneaData = {
+  eventCountLast30d?: number;
+  durationMinutesLast30d?: number;
+  latestEventAt?: string;
+  riskLevel?: HealthSleepApneaRiskLevel;
+  reminder?: string;
+};
+
 export type HealthWorkoutRecord = {
   activityTypeCode?: number;
   activityTypeName?: string;
@@ -87,6 +97,7 @@ export type HealthSleepData = {
   sleepScore?: number;
   stageMinutesLast36h?: HealthSleepStageMinutes;
   samplesLast36h?: HealthSleepSample[];
+  apnea?: HealthSleepApneaData;
 };
 
 export type HealthHeartData = {
@@ -374,6 +385,30 @@ function buildMockSleepData(now: Date): HealthSleepData {
     stageMinutesAccumulator.asleepREMMinutes * 0.02;
   const sleepScore = Math.round(clamp(qualityBase, 45, 98));
 
+  const apneaSeed = Math.random();
+  const apneaEventCountLast30d =
+    apneaSeed < 0.68 ? 0 : apneaSeed < 0.9 ? randomInt(1, 2) : randomInt(3, 7);
+  const apneaDurationMinutesLast30d =
+    apneaEventCountLast30d > 0
+      ? round(apneaEventCountLast30d * randomFloat(1.5, 6.5, 1), 1)
+      : 0;
+  const apneaRiskLevel: HealthSleepApneaRiskLevel =
+    apneaEventCountLast30d === 0
+      ? 'none'
+      : apneaEventCountLast30d <= 2 && apneaDurationMinutesLast30d < 20
+        ? 'watch'
+        : 'high';
+  const apneaReminder =
+    apneaRiskLevel === 'none'
+      ? '近30天未检测到睡眠呼吸暂停事件；若存在打鼾、晨起头痛或白天嗜睡，建议继续观察。'
+      : apneaRiskLevel === 'watch'
+        ? `近30天检测到 ${apneaEventCountLast30d} 次睡眠呼吸暂停事件，建议规律作息并持续追踪。`
+        : `近30天检测到 ${apneaEventCountLast30d} 次睡眠呼吸暂停事件，建议到睡眠专科进一步评估。`;
+  const latestApneaEventAt =
+    apneaEventCountLast30d > 0
+      ? new Date(now.getTime() - randomInt(1, 25) * 24 * 60 * 60 * 1000).toISOString()
+      : undefined;
+
   return {
     inBedMinutesLast36h: round(inBedMinutesLast36h, 1),
     asleepMinutesLast36h: round(asleepMinutesLast36h, 1),
@@ -389,6 +424,13 @@ function buildMockSleepData(now: Date): HealthSleepData {
       asleepREMMinutes: round(stageMinutesAccumulator.asleepREMMinutes, 1),
     },
     samplesLast36h,
+    apnea: {
+      eventCountLast30d: apneaEventCountLast30d,
+      durationMinutesLast30d: apneaDurationMinutesLast30d,
+      latestEventAt: latestApneaEventAt,
+      riskLevel: apneaRiskLevel,
+      reminder: apneaReminder,
+    },
   };
 }
 
@@ -447,7 +489,7 @@ function buildMockHeartData(now: Date): HealthHeartData {
 
 function buildMockOxygenData(now: Date): HealthOxygenData {
   const bloodOxygenSeriesLast24h = buildHourlySeries(now, '%', (_hour, passed) =>
-    passed ? randomFloat(95.2, 99.8, 1) : 0
+    passed ? randomInt(95, 100) : 0
   );
   const valid = bloodOxygenSeriesLast24h.filter(point => point.value > 0);
   return {

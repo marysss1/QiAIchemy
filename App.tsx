@@ -79,6 +79,28 @@ function localizeErrorMessage(message: string, fallbackMessage: string): string 
   return trimmedMessage;
 }
 
+function toPlainChatText(markdownText: string): string {
+  const normalized = markdownText.replace(/\r\n/g, '\n');
+  const withoutFences = normalized.replace(/```[\s\S]*?```/g, (block) =>
+    block.replace(/```[a-zA-Z0-9_-]*\n?/g, '').replace(/```/g, ''),
+  );
+
+  return withoutFences
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^>\s?/gm, '')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/_([^_\n]+)_/g, '$1')
+    .replace(/^\s*[-+*]\s+/gm, '• ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 async function readApiResponse<T>(response: Response): Promise<{ data: T | null; rawText: string }> {
   const rawText = await response.text();
   const contentType = response.headers.get('content-type') ?? '';
@@ -349,13 +371,14 @@ function LoginScreen(): React.JSX.Element {
           sourceTitle: item.sourceTitle as string,
           sectionTitle: item.sectionTitle,
         }));
+      const plainAnswer = toPlainChatText(data.answer as string);
 
       setChatMessages((prev) => [
         ...prev,
         {
           id: createMessageId(),
           role: 'assistant',
-          content: data.answer as string,
+          content: plainAnswer,
           citations,
         },
       ]);
@@ -394,111 +417,10 @@ function LoginScreen(): React.JSX.Element {
       <View style={styles.inkHaloTop} />
       <View style={styles.inkHaloBottom} />
 
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.flex}
-      >
-        <View
-          style={[styles.content, styles.contentSpacing]}
-        >
-          <View style={styles.titleBlock}>
-            <View style={styles.seal} />
-            <Text style={styles.cnTitle}>岐元灵术</Text>
-            <Text style={styles.enTitle}>QiAlchemy</Text>
-            <Text style={styles.subtitle}>中医养生与AI融合实验</Text>
-          </View>
-
-          <View style={styles.card}>
-            {!token ? (
-              <>
-                <View style={styles.tabWrap}>
-                  <Pressable
-                    style={[styles.tabButton, mode === 'login' && styles.tabButtonActive]}
-                    onPress={() => {
-                      setMode('login');
-                      setConfirmPassword('');
-                    }}
-                  >
-                    <Text style={[styles.tabText, mode === 'login' && styles.tabTextActive]}>登录</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.tabButton, mode === 'register' && styles.tabButtonActive]}
-                    onPress={() => setMode('register')}
-                  >
-                    <Text style={[styles.tabText, mode === 'register' && styles.tabTextActive]}>注册</Text>
-                  </Pressable>
-                </View>
-
-                {mode === 'register' && (
-                  <>
-                    <Text style={styles.label}>昵称</Text>
-                    <TextInput
-                      autoCapitalize="none"
-                      placeholder="请输入昵称"
-                      placeholderTextColor="#99866b"
-                      style={styles.input}
-                      value={name}
-                      onChangeText={setName}
-                    />
-                  </>
-                )}
-
-                <Text style={styles.label}>邮箱</Text>
-                <TextInput
-                  autoCapitalize="none"
-                  keyboardType="email-address"
-                  placeholder="请输入邮箱地址"
-                  placeholderTextColor="#99866b"
-                  style={styles.input}
-                  value={email}
-                  onChangeText={setEmail}
-                />
-
-                <Text style={styles.label}>密码</Text>
-                <TextInput
-                  autoCapitalize="none"
-                  autoComplete="off"
-                  textContentType="oneTimeCode"
-                  importantForAutofill="no"
-                  autoCorrect={false}
-                  spellCheck={false}
-                  placeholder={mode === 'login' ? '请输入密码' : '请设置密码（至少8位）'}
-                  placeholderTextColor="#99866b"
-                  secureTextEntry
-                  style={styles.input}
-                  value={password}
-                  onChangeText={setPassword}
-                />
-
-                {mode === 'register' && (
-                  <>
-                    <Text style={styles.label}>确认密码</Text>
-                    <TextInput
-                      autoCapitalize="none"
-                      autoComplete="off"
-                      textContentType="oneTimeCode"
-                      importantForAutofill="no"
-                      autoCorrect={false}
-                      spellCheck={false}
-                      placeholder="请再次输入密码"
-                      placeholderTextColor="#99866b"
-                      secureTextEntry
-                      style={styles.input}
-                      value={confirmPassword}
-                      onChangeText={setConfirmPassword}
-                    />
-                  </>
-                )}
-
-                <Pressable style={[styles.button, loading && styles.buttonDisabled]} onPress={onSubmit} disabled={loading}>
-                  {loading ? (
-                    <ActivityIndicator color="#fff5ef" />
-                  ) : (
-                    <Text style={styles.buttonText}>{mode === 'login' ? '登录' : '注册并登录'}</Text>
-                  )}
-                </Pressable>
-              </>
-            ) : activePanel === 'chat' ? (
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}>
+        {token && activePanel === 'chat' ? (
+          <View style={styles.chatFullscreen}>
+            <View style={styles.chatSurface}>
               <View style={styles.chatPanel}>
                 <View style={styles.chatHeaderRow}>
                   <Pressable style={styles.chatHeaderButton} onPress={() => setActivePanel('home')}>
@@ -585,8 +507,109 @@ function LoginScreen(): React.JSX.Element {
                   </View>
                 ) : null}
               </View>
-            ) : (
-              <>
+            </View>
+          </View>
+        ) : (
+          <View style={[styles.content, styles.contentSpacing]}>
+            <View style={styles.titleBlock}>
+              <View style={styles.seal} />
+              <Text style={styles.cnTitle}>岐元灵术</Text>
+              <Text style={styles.enTitle}>QiAlchemy</Text>
+              <Text style={styles.subtitle}>中医养生与AI融合实验</Text>
+            </View>
+
+            <View style={styles.card}>
+              {!token ? (
+                <>
+                  <View style={styles.tabWrap}>
+                    <Pressable
+                      style={[styles.tabButton, mode === 'login' && styles.tabButtonActive]}
+                      onPress={() => {
+                        setMode('login');
+                        setConfirmPassword('');
+                      }}
+                    >
+                      <Text style={[styles.tabText, mode === 'login' && styles.tabTextActive]}>登录</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.tabButton, mode === 'register' && styles.tabButtonActive]}
+                      onPress={() => setMode('register')}
+                    >
+                      <Text style={[styles.tabText, mode === 'register' && styles.tabTextActive]}>注册</Text>
+                    </Pressable>
+                  </View>
+
+                  {mode === 'register' && (
+                    <>
+                      <Text style={styles.label}>昵称</Text>
+                      <TextInput
+                        autoCapitalize="none"
+                        placeholder="请输入昵称"
+                        placeholderTextColor="#99866b"
+                        style={styles.input}
+                        value={name}
+                        onChangeText={setName}
+                      />
+                    </>
+                  )}
+
+                  <Text style={styles.label}>邮箱</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                    placeholder="请输入邮箱地址"
+                    placeholderTextColor="#99866b"
+                    style={styles.input}
+                    value={email}
+                    onChangeText={setEmail}
+                  />
+
+                  <Text style={styles.label}>密码</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    autoComplete="off"
+                    textContentType="oneTimeCode"
+                    importantForAutofill="no"
+                    autoCorrect={false}
+                    spellCheck={false}
+                    placeholder={mode === 'login' ? '请输入密码' : '请设置密码（至少8位）'}
+                    placeholderTextColor="#99866b"
+                    secureTextEntry
+                    style={styles.input}
+                    value={password}
+                    onChangeText={setPassword}
+                  />
+
+                  {mode === 'register' && (
+                    <>
+                      <Text style={styles.label}>确认密码</Text>
+                      <TextInput
+                        autoCapitalize="none"
+                        autoComplete="off"
+                        textContentType="oneTimeCode"
+                        importantForAutofill="no"
+                        autoCorrect={false}
+                        spellCheck={false}
+                        placeholder="请再次输入密码"
+                        placeholderTextColor="#99866b"
+                        secureTextEntry
+                        style={styles.input}
+                        value={confirmPassword}
+                        onChangeText={setConfirmPassword}
+                      />
+                    </>
+                  )}
+
+                  <Pressable style={[styles.button, loading && styles.buttonDisabled]} onPress={onSubmit} disabled={loading}>
+                    {loading ? (
+                      <ActivityIndicator color="#fff5ef" />
+                    ) : (
+                      <Text style={styles.buttonText}>{mode === 'login' ? '登录' : '注册并登录'}</Text>
+                    )}
+                  </Pressable>
+                </>
+              ) : (
+                <>
                 <View style={styles.userBox}>
                   <Text style={styles.userTitle}>已登录</Text>
                   <Text style={styles.userText}>邮箱：{currentUser?.email}</Text>
@@ -658,10 +681,11 @@ function LoginScreen(): React.JSX.Element {
 
                   {healthError ? <Text style={styles.healthError}>{healthError}</Text> : null}
                 </View>
-              </>
-            )}
+                </>
+              )}
+            </View>
           </View>
-        </View>
+        )}
       </KeyboardAvoidingView>
     </View>
   );
@@ -849,8 +873,25 @@ const styles = StyleSheet.create({
     fontSize: 12,
     textAlign: 'center',
   },
+  chatFullscreen: {
+    flex: 1,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 10,
+  },
+  chatSurface: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: 'rgba(94, 62, 32, 0.2)',
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 252, 246, 0.94)',
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 12,
+  },
   chatPanel: {
-    minHeight: 480,
+    flex: 1,
+    minHeight: 0,
   },
   chatHeaderRow: {
     flexDirection: 'row',
@@ -887,7 +928,8 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   chatScroll: {
-    maxHeight: 360,
+    flex: 1,
+    minHeight: 0,
     borderWidth: 1,
     borderColor: 'rgba(94, 62, 32, 0.18)',
     borderRadius: 14,
@@ -987,7 +1029,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     backgroundColor: 'rgba(44, 25, 12, 0.26)',
-    borderRadius: 16,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 24,

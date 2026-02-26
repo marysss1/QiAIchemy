@@ -36,6 +36,13 @@ QiAIchemy = **Qi** (中医“气”) + **AI** + **Alchemy**（炼化/转化）�
 - 聊天对话页与建议输出（计划）  
 - 饮食图片上传（计划）
 
+## Update (v0.1.0)
+
+- Completed the foundational UI architecture and login page.
+- Implemented mock health data generation.
+- Implemented iOS health data reading.
+- Established the initial frontend-backend integration for chat and health data flow.
+
 ## 技术栈
 
 - React Native 0.84  

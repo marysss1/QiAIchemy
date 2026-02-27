@@ -76,6 +76,8 @@ type SealLogoProps = {
 
 const API_BASE_URL = 'http://127.0.0.1:2818';
 const HEALTH_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+// Temporary switch: mute 5-minute auto sync/upload while validating iOS HealthKit reads.
+const MUTE_AUTO_HEALTH_SYNC = true;
 const API_ERROR_MESSAGE_MAP: Record<string, string> = {
   'Email already registered': '邮箱已被注册',
   'Username already registered': '用户名已被占用',
@@ -1016,7 +1018,7 @@ function LoginScreen(): React.JSX.Element {
       return;
     }
 
-    setAutoHealthSyncEnabled(true);
+    setAutoHealthSyncEnabled(!MUTE_AUTO_HEALTH_SYNC);
     await ensureRiskAlertPermission();
     await syncHealthSnapshot({
       forceMock: useMock,
@@ -1040,7 +1042,7 @@ function LoginScreen(): React.JSX.Element {
         setAutoHealthSyncEnabled(false);
         setHealthError('未完成授权，请检查系统健康权限设置');
       } else {
-        setAutoHealthSyncEnabled(true);
+        setAutoHealthSyncEnabled(!MUTE_AUTO_HEALTH_SYNC);
         await ensureRiskAlertPermission();
         await syncHealthSnapshot({ forceMock: false, silent: true, reason: 'manual' });
         Alert.alert('成功', '已完成 HealthKit 一键授权');
@@ -1054,7 +1056,7 @@ function LoginScreen(): React.JSX.Element {
   };
 
   useEffect(() => {
-    if (!token || !autoHealthSyncEnabled) {
+    if (!token || !autoHealthSyncEnabled || MUTE_AUTO_HEALTH_SYNC) {
       if (healthSyncTimerRef.current) {
         clearInterval(healthSyncTimerRef.current);
         healthSyncTimerRef.current = null;
@@ -1080,7 +1082,7 @@ function LoginScreen(): React.JSX.Element {
   }, [token, autoHealthSyncEnabled, syncHealthSnapshot]);
 
   useEffect(() => {
-    if (!token || !autoHealthSyncEnabled) {
+    if (!token || !autoHealthSyncEnabled || MUTE_AUTO_HEALTH_SYNC) {
       return;
     }
 
@@ -1744,7 +1746,8 @@ function LoginScreen(): React.JSX.Element {
                 ) : null}
 
                 <Text style={styles.healthStatusText}>
-                  自动采集上传（每5分钟）：{autoHealthSyncEnabled ? '已开启' : '未开启'}
+                  自动采集上传（每5分钟）：
+                  {MUTE_AUTO_HEALTH_SYNC ? '已静音（保留代码）' : autoHealthSyncEnabled ? '已开启' : '未开启'}
                 </Text>
                 <Text style={styles.healthStatusText}>
                   风险弹窗权限：

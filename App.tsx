@@ -17,7 +17,6 @@ import {
   View,
 } from 'react-native';
 import {
-  authorizeHealthKit,
   loadHealthSnapshot,
   type HealthSnapshot,
   type HealthWorkoutRecord,
@@ -81,6 +80,8 @@ const HEALTH_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const MUTE_AUTO_HEALTH_SYNC = true;
 // Temporary switch: mute health snapshot POST to backend to avoid server pressure.
 const MUTE_HEALTH_SNAPSHOT_POST = true;
+// Debug switch: print full health snapshot JSON after each successful read.
+const LOG_HEALTH_SNAPSHOT_JSON = true;
 const REMEMBER_LOGIN_SETTINGS_KEY = 'qialchemy.rememberLogin.enabled';
 const REMEMBER_LOGIN_ID_SETTINGS_KEY = 'qialchemy.rememberLogin.id';
 const REMEMBER_PASSWORD_SETTINGS_KEY = 'qialchemy.rememberLogin.password';
@@ -999,6 +1000,13 @@ function LoginScreen(): React.JSX.Element {
 
       try {
         const snapshot = await loadHealthSnapshot(forceMock);
+        if (LOG_HEALTH_SNAPSHOT_JSON) {
+          try {
+            console.log(`[health][${reason}] snapshot_json=${JSON.stringify(snapshot)}`);
+          } catch (stringifyError) {
+            console.log('[health] snapshot stringify failed', stringifyError);
+          }
+        }
 
         setHealthSnapshot(snapshot);
         setVisualReady(true);
@@ -1075,34 +1083,6 @@ function LoginScreen(): React.JSX.Element {
       silent: false,
       reason: 'manual',
     });
-  };
-
-  const onAuthorizeHealth = async () => {
-    if (!canUseHealth) {
-      Alert.alert('提示', '请先登录后再进行 HealthKit 授权');
-      return;
-    }
-
-    setHealthLoading(true);
-    setHealthError('');
-    try {
-      const granted = await authorizeHealthKit();
-      setHealthAuthorized(granted);
-      if (!granted) {
-        setAutoHealthSyncEnabled(false);
-        setHealthError('未完成授权，请检查系统健康权限设置');
-      } else {
-        setAutoHealthSyncEnabled(!MUTE_AUTO_HEALTH_SYNC);
-        void ensureRiskAlertPermission();
-        await syncHealthSnapshot({ forceMock: false, silent: true, reason: 'manual' });
-        Alert.alert('成功', '已完成 HealthKit 一键授权');
-      }
-    } catch (error) {
-      const rawMessage = error instanceof Error ? error.message : '';
-      setHealthError(localizeErrorMessage(rawMessage, 'HealthKit 授权失败'));
-    } finally {
-      setHealthLoading(false);
-    }
   };
 
   useEffect(() => {
@@ -1695,7 +1675,7 @@ function LoginScreen(): React.JSX.Element {
                 <TextInput
                   autoCapitalize="none"
                   autoComplete="off"
-                  textContentType="oneTimeCode"
+                  textContentType="none"
                   importantForAutofill="no"
                   autoCorrect={false}
                   spellCheck={false}
@@ -1727,7 +1707,7 @@ function LoginScreen(): React.JSX.Element {
                     <TextInput
                       autoCapitalize="none"
                       autoComplete="off"
-                      textContentType="oneTimeCode"
+                      textContentType="none"
                       importantForAutofill="no"
                       autoCorrect={false}
                       spellCheck={false}
@@ -1785,16 +1765,9 @@ function LoginScreen(): React.JSX.Element {
                 </View>
 
                 <Text style={styles.healthTitle}>HealthKit 全量数据读取</Text>
-                <Text style={styles.healthHint}>上方按钮用于授权与读取，读取 Mock 后自动进入可视化页面。</Text>
+                <Text style={styles.healthHint}>点击读取真实数据或 Mock 数据，读取后进入可视化页面。</Text>
 
                 <View style={styles.healthActionRow}>
-                  <Pressable
-                    style={[styles.healthActionButton, healthLoading && styles.buttonDisabled]}
-                    onPress={onAuthorizeHealth}
-                    disabled={healthLoading}
-                  >
-                    <Text style={styles.healthActionText}>{healthLoading ? '处理中...' : '一键授权'}</Text>
-                  </Pressable>
                   <Pressable
                     style={[styles.healthActionButton, healthLoading && styles.buttonDisabled]}
                     onPress={() => onLoadHealthData(false)}
@@ -1814,40 +1787,6 @@ function LoginScreen(): React.JSX.Element {
                     <Text style={styles.healthActionText}>读取 Mock 数据</Text>
                   </Pressable>
                 </View>
-
-                {healthAuthorized !== null ? (
-                  <Text style={styles.healthStatusText}>一键授权：{healthAuthorized ? '成功' : '失败'}</Text>
-                ) : null}
-
-                <Text style={styles.healthStatusText}>
-                  自动采集上传（每5分钟）：
-                  {MUTE_AUTO_HEALTH_SYNC ? '已静音（保留代码）' : autoHealthSyncEnabled ? '已开启' : '未开启'}
-                </Text>
-                <Text style={styles.healthStatusText}>
-                  健康快照上传：{MUTE_HEALTH_SNAPSHOT_POST ? '已静音（不向后端POST）' : '已开启'}
-                </Text>
-                <Text style={styles.healthStatusText}>
-                  风险弹窗权限：
-                  {riskAlertPermission === null
-                    ? '待确认'
-                    : riskAlertPermission
-                      ? '已允许'
-                      : '未允许'}
-                </Text>
-                <Text style={styles.healthStatusText}>
-                  自动任务状态：{autoHealthSyncing ? '同步中' : '空闲'}
-                </Text>
-                {lastHealthSyncAt ? (
-                  <Text style={styles.healthStatusText}>
-                    最近采集：{formatDateLabel(lastHealthSyncAt)}（
-                    {lastHealthSource === 'healthkit' ? 'HealthKit' : 'Mock'}）
-                  </Text>
-                ) : null}
-                {lastHealthUploadAt ? (
-                  <Text style={styles.healthStatusText}>
-                    最近上传：{formatDateLabel(lastHealthUploadAt)}
-                  </Text>
-                ) : null}
 
                 {healthError ? <Text style={styles.healthError}>{healthError}</Text> : null}
 

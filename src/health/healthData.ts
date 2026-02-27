@@ -98,6 +98,10 @@ export type HealthSleepData = {
   awakeMinutesLast36h?: number;
   sampleCountLast36h?: number;
   sleepScore?: number;
+  sleepScoreSource?: 'today' | 'latestAvailable';
+  sleepScoreWindowStart?: string;
+  sleepScoreWindowEnd?: string;
+  sleepScoreFallbackUsed?: boolean;
   stageMinutesLast36h?: HealthSleepStageMinutes;
   samplesLast36h?: HealthSleepSample[];
   apnea?: HealthSleepApneaData;

@@ -549,7 +549,7 @@ class HealthKitManager: NSObject {
     let predicate = HKQuery.predicateForSamples(
       withStart: start,
       end: now,
-      options: .strictStartDate
+      options: []
     )
 
     let query = HKSampleQuery(
@@ -563,74 +563,233 @@ class HealthKitManager: NSObject {
         return
       }
 
-      var inBed: TimeInterval = 0
-      var asleep: TimeInterval = 0
-      var awake: TimeInterval = 0
-
-      var stageDurations: [String: TimeInterval] = [
-        "inBed": 0,
-        "asleepUnspecified": 0,
-        "awake": 0,
-        "asleepCore": 0,
-        "asleepDeep": 0,
-        "asleepREM": 0,
-      ]
-
       let categorySamples = (samples ?? []).compactMap { $0 as? HKCategorySample }
-      categorySamples.forEach { sample in
-        let duration = sample.endDate.timeIntervalSince(sample.startDate)
-        guard duration > 0 else {
-          return
-        }
-
-        if self.isSleepInBed(sample.value) {
-          inBed += duration
-        } else if self.isSleepAsleep(sample.value) {
-          asleep += duration
-        } else if self.isSleepAwake(sample.value) {
-          awake += duration
-        }
-
-        let stage = self.sleepStageName(sample.value)
-        if stageDurations[stage] != nil {
-          stageDurations[stage, default: 0] += duration
-        }
+      if let summary = self.buildSleepSummary(
+        from: categorySamples,
+        windowStart: start,
+        windowEnd: now,
+        scoreSource: "today"
+      ) {
+        completion(summary, nil)
+        return
       }
 
-      let stageMinutes: [String: Any] = [
-        "inBedMinutes": Self.round((stageDurations["inBed"] ?? 0) / 60),
-        "asleepUnspecifiedMinutes": Self.round((stageDurations["asleepUnspecified"] ?? 0) / 60),
-        "awakeMinutes": Self.round((stageDurations["awake"] ?? 0) / 60),
-        "asleepCoreMinutes": Self.round((stageDurations["asleepCore"] ?? 0) / 60),
-        "asleepDeepMinutes": Self.round((stageDurations["asleepDeep"] ?? 0) / 60),
-        "asleepREMMinutes": Self.round((stageDurations["asleepREM"] ?? 0) / 60),
-      ]
-
-      let sleepSamples = categorySamples
-        .sorted { $0.startDate < $1.startDate }
-        .map { sample -> [String: Any] in
-          let source = sample.sourceRevision.source
-          return [
-            "value": sample.value,
-            "stage": self.sleepStageName(sample.value),
-            "startDate": Self.isoString(from: sample.startDate),
-            "endDate": Self.isoString(from: sample.endDate),
-            "sourceName": source.name,
-            "sourceBundleId": source.bundleIdentifier,
-          ]
-        }
-
-      completion([
-        "inBedMinutesLast36h": Self.round(inBed / 60),
-        "asleepMinutesLast36h": Self.round(asleep / 60),
-        "awakeMinutesLast36h": Self.round(awake / 60),
-        "sampleCountLast36h": categorySamples.count,
-        "stageMinutesLast36h": stageMinutes,
-        "samplesLast36h": sleepSamples,
-      ], nil)
+      self.queryMostRecentSleepSummaryFallback(
+        type: type,
+        lookbackDays: 365,
+        completion: completion
+      )
     }
 
     healthStore.execute(query)
+  }
+
+  private func queryMostRecentSleepSummaryFallback(
+    type: HKCategoryType,
+    lookbackDays: Int,
+    completion: @escaping ([String: Any]?, Error?) -> Void
+  ) {
+    let now = Date()
+    guard let start = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: now) else {
+      completion(nil, nil)
+      return
+    }
+
+    let predicate = HKQuery.predicateForSamples(
+      withStart: start,
+      end: now,
+      options: []
+    )
+    let sort = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
+    let query = HKSampleQuery(
+      sampleType: type,
+      predicate: predicate,
+      limit: HKObjectQueryNoLimit,
+      sortDescriptors: [sort]
+    ) { _, samples, error in
+      if let error {
+        completion(nil, error)
+        return
+      }
+
+      let categorySamples = (samples ?? []).compactMap { $0 as? HKCategorySample }
+      let clusters = self.clusterSleepSamples(categorySamples)
+
+      for cluster in clusters.reversed() {
+        guard
+          let windowStart = cluster.first?.startDate,
+          let windowEnd = cluster.last?.endDate
+        else {
+          continue
+        }
+
+        if let summary = self.buildSleepSummary(
+          from: cluster,
+          windowStart: windowStart,
+          windowEnd: windowEnd,
+          scoreSource: "latestAvailable"
+        ) {
+          completion(summary, nil)
+          return
+        }
+      }
+
+      completion(nil, nil)
+    }
+
+    healthStore.execute(query)
+  }
+
+  private func clusterSleepSamples(_ samples: [HKCategorySample]) -> [[HKCategorySample]] {
+    guard !samples.isEmpty else {
+      return []
+    }
+
+    let sorted = samples.sorted { lhs, rhs in
+      if lhs.startDate == rhs.startDate {
+        return lhs.endDate < rhs.endDate
+      }
+      return lhs.startDate < rhs.startDate
+    }
+
+    let maxGap: TimeInterval = 2 * 60 * 60
+    var clusters: [[HKCategorySample]] = []
+    var currentCluster: [HKCategorySample] = []
+
+    for sample in sorted {
+      guard let last = currentCluster.last else {
+        currentCluster.append(sample)
+        continue
+      }
+
+      let gap = sample.startDate.timeIntervalSince(last.endDate)
+      if gap <= maxGap {
+        currentCluster.append(sample)
+      } else {
+        if !currentCluster.isEmpty {
+          clusters.append(currentCluster)
+        }
+        currentCluster = [sample]
+      }
+    }
+
+    if !currentCluster.isEmpty {
+      clusters.append(currentCluster)
+    }
+
+    return clusters
+  }
+
+  private func buildSleepSummary(
+    from categorySamples: [HKCategorySample],
+    windowStart: Date,
+    windowEnd: Date,
+    scoreSource: String
+  ) -> [String: Any]? {
+    guard !categorySamples.isEmpty else {
+      return nil
+    }
+
+    var inBed: TimeInterval = 0
+    var asleep: TimeInterval = 0
+    var awake: TimeInterval = 0
+
+    var stageDurations: [String: TimeInterval] = [
+      "inBed": 0,
+      "asleepUnspecified": 0,
+      "awake": 0,
+      "asleepCore": 0,
+      "asleepDeep": 0,
+      "asleepREM": 0,
+    ]
+
+    categorySamples.forEach { sample in
+      let duration = sample.endDate.timeIntervalSince(sample.startDate)
+      guard duration > 0 else {
+        return
+      }
+
+      if self.isSleepInBed(sample.value) {
+        inBed += duration
+      } else if self.isSleepAsleep(sample.value) {
+        asleep += duration
+      } else if self.isSleepAwake(sample.value) {
+        awake += duration
+      }
+
+      let stage = self.sleepStageName(sample.value)
+      if stageDurations[stage] != nil {
+        stageDurations[stage, default: 0] += duration
+      }
+    }
+
+    let asleepMinutes = asleep / 60
+    if asleepMinutes <= 0 {
+      return nil
+    }
+
+    let awakeMinutes = awake / 60
+    let deepMinutes = (stageDurations["asleepDeep"] ?? 0) / 60
+    let remMinutes = (stageDurations["asleepREM"] ?? 0) / 60
+    let sleepScore = self.estimateSleepScore(
+      asleepMinutes: asleepMinutes,
+      awakeMinutes: awakeMinutes,
+      deepMinutes: deepMinutes,
+      remMinutes: remMinutes
+    )
+
+    let stageMinutes: [String: Any] = [
+      "inBedMinutes": Self.round((stageDurations["inBed"] ?? 0) / 60),
+      "asleepUnspecifiedMinutes": Self.round((stageDurations["asleepUnspecified"] ?? 0) / 60),
+      "awakeMinutes": Self.round((stageDurations["awake"] ?? 0) / 60),
+      "asleepCoreMinutes": Self.round((stageDurations["asleepCore"] ?? 0) / 60),
+      "asleepDeepMinutes": Self.round((stageDurations["asleepDeep"] ?? 0) / 60),
+      "asleepREMMinutes": Self.round((stageDurations["asleepREM"] ?? 0) / 60),
+    ]
+
+    let sleepSamples = categorySamples
+      .sorted { $0.startDate < $1.startDate }
+      .map { sample -> [String: Any] in
+        let source = sample.sourceRevision.source
+        return [
+          "value": sample.value,
+          "stage": self.sleepStageName(sample.value),
+          "startDate": Self.isoString(from: sample.startDate),
+          "endDate": Self.isoString(from: sample.endDate),
+          "sourceName": source.name,
+          "sourceBundleId": source.bundleIdentifier,
+        ]
+      }
+
+    return [
+      "inBedMinutesLast36h": Self.round(inBed / 60),
+      "asleepMinutesLast36h": Self.round(asleepMinutes),
+      "awakeMinutesLast36h": Self.round(awakeMinutes),
+      "sampleCountLast36h": categorySamples.count,
+      "sleepScore": sleepScore,
+      "sleepScoreSource": scoreSource,
+      "sleepScoreWindowStart": Self.isoString(from: windowStart),
+      "sleepScoreWindowEnd": Self.isoString(from: windowEnd),
+      "sleepScoreFallbackUsed": scoreSource != "today",
+      "stageMinutesLast36h": stageMinutes,
+      "samplesLast36h": sleepSamples,
+    ]
+  }
+
+  private func estimateSleepScore(
+    asleepMinutes: Double,
+    awakeMinutes: Double,
+    deepMinutes: Double,
+    remMinutes: Double
+  ) -> Int {
+    let qualityBase = 95.0
+      - abs(asleepMinutes - 450.0) * 0.08
+      - awakeMinutes * 0.45
+      + deepMinutes * 0.03
+      + remMinutes * 0.02
+
+    let clamped = min(max(qualityBase, 45.0), 98.0)
+    return Int(Darwin.round(clamped))
   }
 
   private func queryTodayActivityGoals(completion: @escaping ([String: Any]?, Error?) -> Void) {
@@ -641,8 +800,10 @@ class HealthKitManager: NSObject {
         completion(nil, nil)
         return
       }
-      let startComponents = calendar.dateComponents([.year, .month, .day], from: startDate)
-      let endComponents = calendar.dateComponents([.year, .month, .day], from: endDate)
+      var startComponents = calendar.dateComponents([.year, .month, .day], from: startDate)
+      var endComponents = calendar.dateComponents([.year, .month, .day], from: endDate)
+      startComponents.calendar = calendar
+      endComponents.calendar = calendar
       let predicate = HKQuery.predicate(
         forActivitySummariesBetweenStart: startComponents,
         end: endComponents

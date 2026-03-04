@@ -4,7 +4,7 @@
   "private": true,
   "author": "Mengyu Su",
   "contributors": [
-    "Primo Pan (Assistant,FrontEnd Bridge)"
+    "Primo Pan (Assistant,ios Bridge,RAG modify)"
   ],
   "scripts": {
     "android": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-android",

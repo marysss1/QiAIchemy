@@ -210,6 +210,13 @@ function truncateSeries(points: Array<{ timestamp: string; value: number; unit: 
   return points.slice(points.length - limit);
 }
 
+function truncateTail<T>(items: T[] | undefined, limit: number): T[] | undefined {
+  if (!items || items.length <= limit) {
+    return items;
+  }
+  return items.slice(items.length - limit);
+}
+
 function truncateWorkouts(workouts: HealthWorkoutRecord[] | undefined, limit: number): HealthWorkoutRecord[] | undefined {
   if (!workouts || workouts.length <= limit) {
     return workouts;
@@ -279,6 +286,59 @@ function compactSnapshotForAutoUpload(snapshot: HealthSnapshot): HealthSnapshot 
           bodyMassSeriesLast30d: truncateSeries(snapshot.body.bodyMassSeriesLast30d, AUTO_UPLOAD_SERIES_LIMIT),
         }
       : undefined,
+    huawei: snapshot.huawei
+      ? {
+          ...snapshot.huawei,
+          activity: snapshot.huawei.activity
+            ? {
+                ...snapshot.huawei.activity,
+                stepsSeriesToday: truncateSeries(snapshot.huawei.activity.stepsSeriesToday, AUTO_UPLOAD_SERIES_LIMIT),
+                caloriesSeriesToday: truncateSeries(snapshot.huawei.activity.caloriesSeriesToday, AUTO_UPLOAD_SERIES_LIMIT),
+                activeMinutesSeriesToday: truncateSeries(
+                  snapshot.huawei.activity.activeMinutesSeriesToday,
+                  AUTO_UPLOAD_SERIES_LIMIT
+                ),
+              }
+            : undefined,
+          sleep: snapshot.huawei.sleep
+            ? {
+                ...snapshot.huawei.sleep,
+                sleepSegmentsLast24h: truncateTail(snapshot.huawei.sleep.sleepSegmentsLast24h, AUTO_UPLOAD_SLEEP_SAMPLES_LIMIT),
+              }
+            : undefined,
+          heart: snapshot.huawei.heart
+            ? {
+                ...snapshot.huawei.heart,
+                heartRateSeriesLast24h: truncateSeries(
+                  snapshot.huawei.heart.heartRateSeriesLast24h,
+                  AUTO_UPLOAD_SERIES_LIMIT
+                ),
+              }
+            : undefined,
+          oxygen: snapshot.huawei.oxygen
+            ? {
+                ...snapshot.huawei.oxygen,
+                spO2SeriesLast24h: truncateSeries(snapshot.huawei.oxygen.spO2SeriesLast24h, AUTO_UPLOAD_SERIES_LIMIT),
+              }
+            : undefined,
+          stress: snapshot.huawei.stress
+            ? {
+                ...snapshot.huawei.stress,
+                stressSeriesLast24h: truncateSeries(snapshot.huawei.stress.stressSeriesLast24h, AUTO_UPLOAD_SERIES_LIMIT),
+              }
+            : undefined,
+          bloodPressure: snapshot.huawei.bloodPressure
+            ? {
+                ...snapshot.huawei.bloodPressure,
+                bloodPressureSeriesLast30d: truncateTail(
+                  snapshot.huawei.bloodPressure.bloodPressureSeriesLast30d,
+                  AUTO_UPLOAD_SERIES_LIMIT
+                ),
+              }
+            : undefined,
+          workouts: truncateWorkouts(snapshot.huawei.workouts, 8),
+        }
+      : undefined,
     workouts: truncateWorkouts(snapshot.workouts, 8),
   };
 }
@@ -310,6 +370,7 @@ function buildSnapshotStateKey(snapshot: HealthSnapshot): string {
     metabolic: compact.metabolic,
     environment: compact.environment,
     body: compact.body,
+    huawei: compact.huawei,
     workouts: compact.workouts,
   });
   return String(hashCode(payload));
@@ -445,6 +506,12 @@ function SealLogo({ size = 40, style }: SealLogoProps): React.JSX.Element {
 function SnapshotRawPanel({ snapshot }: { snapshot: HealthSnapshot }): React.JSX.Element {
   const latestWorkouts = (snapshot.workouts ?? []).slice(0, 3);
   const glucoseMmolL = mgDlToMmolL(snapshot.metabolic?.bloodGlucoseMgDl);
+  const sourceLabel =
+    snapshot.source === 'mock'
+      ? 'Mock'
+      : snapshot.source === 'huawei_health'
+      ? '华为健康'
+      : 'HealthKit 真机';
 
   const rows = [
     {
@@ -488,7 +555,7 @@ function SnapshotRawPanel({ snapshot }: { snapshot: HealthSnapshot }): React.JSX
     <View style={styles.rawPanel}>
       <Text style={styles.rawPanelTitle}>全量字段核验面板</Text>
       <Text style={styles.rawPanelMeta}>采集时间：{formatDateLabel(snapshot.generatedAt)}</Text>
-      <Text style={styles.rawPanelMeta}>数据源：{snapshot.source === 'mock' ? 'Mock' : 'HealthKit 真机'}</Text>
+      <Text style={styles.rawPanelMeta}>数据源：{sourceLabel}</Text>
 
       <View style={styles.rawRowWrap}>
         {rows.map(row => (
@@ -594,7 +661,7 @@ function LoginScreen(): React.JSX.Element {
   const [autoHealthSyncing, setAutoHealthSyncing] = useState(false);
   const [lastHealthSyncAt, setLastHealthSyncAt] = useState<string | null>(null);
   const [lastHealthUploadAt, setLastHealthUploadAt] = useState<string | null>(null);
-  const [lastHealthSource, setLastHealthSource] = useState<'healthkit' | 'mock' | null>(null);
+  const [lastHealthSource, setLastHealthSource] = useState<'healthkit' | 'huawei_health' | 'mock' | null>(null);
   const [sleepAdvice, setSleepAdvice] = useState('');
   const [sleepAdviceLoading, setSleepAdviceLoading] = useState(false);
   const [sleepAdviceUpdatedAt, setSleepAdviceUpdatedAt] = useState<string | null>(null);
@@ -626,6 +693,15 @@ function LoginScreen(): React.JSX.Element {
   const sleepAdviceInFlightRef = useRef(false);
 
   const canUseHealth = Boolean(token);
+  const isAndroid = Platform.OS === 'android';
+  const healthPanelTitle = isAndroid ? '华为健康全量数据读取' : 'HealthKit 全量数据读取';
+  const healthHintText = isAndroid
+    ? '点击读取华为健康数据或 Mock 数据，读取后进入可视化页面。'
+    : '点击读取 HealthKit 真实数据，读取后进入可视化页面。';
+  const healthRealButtonText = isAndroid ? '读取华为健康数据' : '读取真实数据';
+  const visualPlaceholderText = isAndroid
+    ? '点击“读取华为健康数据”或“读取 Mock 数据”后，将进入中国风健康数据可视化页面（可上下滑动）。'
+    : '点击“读取真实数据”后，将进入中国风健康数据可视化页面（可上下滑动）。';
 
   const clearHealthSyncTimer = useCallback(() => {
     if (healthSyncTimerRef.current) {
@@ -2037,8 +2113,8 @@ function LoginScreen(): React.JSX.Element {
                   </Pressable>
                 </View>
 
-                <Text style={styles.healthTitle}>HealthKit 全量数据读取</Text>
-                <Text style={styles.healthHint}>点击读取真实数据或 Mock 数据，读取后进入可视化页面。</Text>
+                <Text style={styles.healthTitle}>{healthPanelTitle}</Text>
+                <Text style={styles.healthHint}>{healthHintText}</Text>
 
                 <View style={styles.healthActionRow}>
                   <Pressable
@@ -2046,19 +2122,21 @@ function LoginScreen(): React.JSX.Element {
                     onPress={() => onLoadHealthData(false)}
                     disabled={healthLoading}
                   >
-                    <Text style={styles.healthActionText}>读取真实数据</Text>
+                    <Text style={styles.healthActionText}>{healthRealButtonText}</Text>
                   </Pressable>
-                  <Pressable
-                    style={[
-                      styles.healthActionButton,
-                      styles.healthActionButtonSecondary,
-                      healthLoading && styles.buttonDisabled,
-                    ]}
-                    onPress={() => onLoadHealthData(true)}
-                    disabled={healthLoading}
-                  >
-                    <Text style={styles.healthActionText}>读取 Mock 数据</Text>
-                  </Pressable>
+                  {isAndroid ? (
+                    <Pressable
+                      style={[
+                        styles.healthActionButton,
+                        styles.healthActionButtonSecondary,
+                        healthLoading && styles.buttonDisabled,
+                      ]}
+                      onPress={() => onLoadHealthData(true)}
+                      disabled={healthLoading}
+                    >
+                      <Text style={styles.healthActionText}>读取 Mock 数据</Text>
+                    </Pressable>
+                  ) : null}
                 </View>
 
                 {healthError ? <Text style={styles.healthError}>{healthError}</Text> : null}
@@ -2092,9 +2170,7 @@ function LoginScreen(): React.JSX.Element {
                   </ScrollView>
                 ) : (
                   <View style={styles.visualPlaceholder}>
-                    <Text style={styles.visualPlaceholderText}>
-                      点击“读取 Mock 数据”后，将进入中国风健康数据可视化页面（可上下滑动）。
-                    </Text>
+                    <Text style={styles.visualPlaceholderText}>{visualPlaceholderText}</Text>
                   </View>
                 )}
               </View>

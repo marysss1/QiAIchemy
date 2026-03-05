@@ -74,6 +74,9 @@ export type HealthWorkoutRecord = {
   durationMinutes?: number;
   totalEnergyKcal?: number;
   totalDistanceKm?: number;
+  averageHeartRateBpm?: number;
+  maxHeartRateBpm?: number;
+  sourceDevice?: string;
 };
 
 export type HealthActivityData = {
@@ -144,8 +147,90 @@ export type HealthBodyData = {
   bodyMassSeriesLast30d?: HealthTrendPoint[];
 };
 
+export type HealthSnapshotSource = 'healthkit' | 'huawei_health' | 'mock';
+
+export type HuaweiSleepStage = 'deep' | 'light' | 'rem' | 'awake' | 'nap' | 'unknown';
+
+export type HuaweiSleepSegment = {
+  stage: HuaweiSleepStage;
+  startDate: string;
+  endDate: string;
+  durationMinutes?: number;
+};
+
+export type HuaweiBloodPressurePoint = {
+  timestamp: string;
+  systolicMmhg: number;
+  diastolicMmhg: number;
+  unit?: string;
+};
+
+export type HealthHuaweiData = {
+  deviceModel?: string;
+  appVersion?: string;
+  dataWindowStart?: string;
+  dataWindowEnd?: string;
+  activity?: {
+    stepsToday?: number;
+    distanceKmToday?: number;
+    caloriesKcalToday?: number;
+    floorsClimbedToday?: number;
+    activeMinutesToday?: number;
+    moderateToVigorousMinutesToday?: number;
+    standingHoursToday?: number;
+    stepsSeriesToday?: HealthTrendPoint[];
+    caloriesSeriesToday?: HealthTrendPoint[];
+    activeMinutesSeriesToday?: HealthTrendPoint[];
+  };
+  sleep?: {
+    asleepMinutesLast24h?: number;
+    deepSleepMinutesLast24h?: number;
+    lightSleepMinutesLast24h?: number;
+    remSleepMinutesLast24h?: number;
+    awakeMinutesLast24h?: number;
+    napMinutesLast24h?: number;
+    sleepScore?: number;
+    bedTime?: string;
+    wakeTime?: string;
+    sleepSegmentsLast24h?: HuaweiSleepSegment[];
+  };
+  heart?: {
+    latestHeartRateBpm?: number;
+    restingHeartRateBpm?: number;
+    maxHeartRateBpmLast24h?: number;
+    minHeartRateBpmLast24h?: number;
+    heartRateWarning?: string;
+    heartRateSeriesLast24h?: HealthTrendPoint[];
+  };
+  oxygen?: {
+    latestSpO2Percent?: number;
+    minSpO2PercentLast24h?: number;
+    spO2SeriesLast24h?: HealthTrendPoint[];
+  };
+  stress?: {
+    latestStressScore?: number;
+    averageStressScoreToday?: number;
+    hrvMs?: number;
+    stressSeriesLast24h?: HealthTrendPoint[];
+  };
+  body?: {
+    weightKg?: number;
+    bmi?: number;
+    bodyFatPercent?: number;
+    skeletalMuscleKg?: number;
+    bodyWaterPercent?: number;
+    visceralFatLevel?: number;
+  };
+  bloodPressure?: {
+    latestSystolicMmhg?: number;
+    latestDiastolicMmhg?: number;
+    bloodPressureSeriesLast30d?: HuaweiBloodPressurePoint[];
+  };
+  workouts?: HealthWorkoutRecord[];
+};
+
 export type HealthKitAllData = {
-  source: 'healthkit' | 'mock';
+  source: HealthSnapshotSource;
   authorized: boolean;
   generatedAt: string;
   note?: string;
@@ -156,6 +241,7 @@ export type HealthKitAllData = {
   metabolic?: HealthMetabolicData;
   environment?: HealthEnvironmentData;
   body?: HealthBodyData;
+  huawei?: HealthHuaweiData;
   workouts?: HealthWorkoutRecord[];
 };
 
@@ -167,8 +253,15 @@ type NativeHealthKitManager = {
   getHealthSnapshot: () => Promise<HealthKitAllData>;
 };
 
-const { HealthKitManager } = NativeModules as {
+type NativeHuaweiHealthManager = {
+  isHealthDataAvailable?: () => Promise<boolean>;
+  requestAuthorization?: () => Promise<boolean>;
+  getHealthSnapshot: () => Promise<HealthKitAllData>;
+};
+
+const { HealthKitManager, HuaweiHealthManager } = NativeModules as {
   HealthKitManager?: NativeHealthKitManager;
+  HuaweiHealthManager?: NativeHuaweiHealthManager;
 };
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -214,6 +307,24 @@ function stageCode(stage: HealthSleepStageOrUnknown): number {
     return -1;
   }
   return IOS_SLEEP_STAGE_CODES[stage];
+}
+
+function toHuaweiSleepStage(stage: HealthSleepStageOrUnknown): HuaweiSleepStage {
+  switch (stage) {
+    case 'asleepDeep':
+      return 'deep';
+    case 'asleepREM':
+      return 'rem';
+    case 'awake':
+      return 'awake';
+    case 'inBed':
+      return 'nap';
+    case 'asleepCore':
+    case 'asleepUnspecified':
+      return 'light';
+    default:
+      return 'unknown';
+  }
 }
 
 function isoDayOffset(base: Date, dayOffset: number, hour = 8, minute = 0): string {
@@ -646,6 +757,306 @@ function buildMockSnapshot(): HealthKitAllData {
   };
 }
 
+function buildHuaweiHealthFallbackSnapshot(): HealthKitAllData {
+  const now = new Date();
+  const activity = buildMockActivityData(now);
+  const sleep = buildMockSleepData(now);
+  const heart = buildMockHeartData(now);
+  const oxygen = buildMockOxygenData(now);
+  const metabolic = buildMockMetabolicData(now);
+  const environment = buildMockEnvironmentData(now);
+  const body = buildMockBodyData(now);
+  const workouts = buildMockWorkouts(now).map(item => ({
+    ...item,
+    averageHeartRateBpm: randomInt(98, 146),
+    maxHeartRateBpm: randomInt(130, 178),
+    sourceDevice: 'HUAWEI WATCH',
+  }));
+
+  const last24hMs = now.getTime() - 24 * 60 * 60 * 1000;
+  const sleepSegmentsLast24h: HuaweiSleepSegment[] = (sleep.samplesLast36h ?? [])
+    .filter(sample => {
+      const endMs = new Date(sample.endDate).getTime();
+      return Number.isFinite(endMs) && endMs >= last24hMs;
+    })
+    .slice(-180)
+    .map(sample => {
+      const startMs = new Date(sample.startDate).getTime();
+      const endMs = new Date(sample.endDate).getTime();
+      return {
+        stage: toHuaweiSleepStage(sample.stage),
+        startDate: sample.startDate,
+        endDate: sample.endDate,
+        durationMinutes: Number.isFinite(startMs) && Number.isFinite(endMs) ? round(Math.max(0, (endMs - startMs) / 60000), 1) : undefined,
+      };
+    });
+
+  const stressSeriesLast24h = buildHourlySeries(now, 'score', (hour, passed) => {
+    if (!passed) {
+      return 0;
+    }
+    if (hour >= 9 && hour <= 18) {
+      return randomInt(35, 78);
+    }
+    if (hour <= 6) {
+      return randomInt(12, 30);
+    }
+    return randomInt(20, 56);
+  }).filter(point => point.value > 0);
+
+  const bloodPressureSeriesLast30d: HuaweiBloodPressurePoint[] = Array.from({ length: 14 }, (_, index) => {
+    const timestamp = isoDayOffset(now, -(13 - index), 8, 30);
+    return {
+      timestamp,
+      systolicMmhg: randomInt(108, 134),
+      diastolicMmhg: randomInt(67, 88),
+      unit: 'mmHg',
+    };
+  });
+
+  const latestBloodPressure = bloodPressureSeriesLast30d[bloodPressureSeriesLast30d.length - 1];
+  const latestStressScore = stressSeriesLast24h[stressSeriesLast24h.length - 1]?.value;
+  const avgStressScore =
+    stressSeriesLast24h.length > 0
+      ? round(stressSeriesLast24h.reduce((sum, item) => sum + item.value, 0) / stressSeriesLast24h.length, 1)
+      : undefined;
+  const heartRateWarning =
+    typeof heart.latestHeartRateBpm === 'number'
+      ? heart.latestHeartRateBpm >= 130
+        ? 'high'
+        : heart.latestHeartRateBpm >= 115
+        ? 'watch'
+        : heart.latestHeartRateBpm <= 45
+        ? 'low'
+        : undefined
+      : undefined;
+
+  const huawei: HealthHuaweiData = {
+    deviceModel: 'HUAWEI WATCH',
+    appVersion: 'android-fallback',
+    dataWindowStart: new Date(last24hMs).toISOString(),
+    dataWindowEnd: now.toISOString(),
+    activity: {
+      stepsToday: activity.stepsToday,
+      distanceKmToday: activity.distanceWalkingRunningKmToday,
+      caloriesKcalToday: activity.activeEnergyKcalToday,
+      floorsClimbedToday: activity.flightsClimbedToday,
+      activeMinutesToday: activity.exerciseMinutesToday,
+      moderateToVigorousMinutesToday: activity.exerciseMinutesToday,
+      standingHoursToday: activity.standHoursToday,
+      stepsSeriesToday: activity.stepsHourlySeriesToday,
+      caloriesSeriesToday: activity.activeEnergyHourlySeriesToday,
+      activeMinutesSeriesToday: activity.exerciseMinutesHourlySeriesToday,
+    },
+    sleep: {
+      asleepMinutesLast24h: sleep.asleepMinutesLast36h,
+      deepSleepMinutesLast24h: sleep.stageMinutesLast36h?.asleepDeepMinutes,
+      lightSleepMinutesLast24h:
+        (sleep.stageMinutesLast36h?.asleepCoreMinutes ?? 0) + (sleep.stageMinutesLast36h?.asleepUnspecifiedMinutes ?? 0),
+      remSleepMinutesLast24h: sleep.stageMinutesLast36h?.asleepREMMinutes,
+      awakeMinutesLast24h: sleep.awakeMinutesLast36h,
+      napMinutesLast24h: randomInt(0, 35),
+      sleepScore: sleep.sleepScore,
+      bedTime: sleepSegmentsLast24h[0]?.startDate,
+      wakeTime: sleepSegmentsLast24h[sleepSegmentsLast24h.length - 1]?.endDate,
+      sleepSegmentsLast24h,
+    },
+    heart: {
+      latestHeartRateBpm: heart.latestHeartRateBpm,
+      restingHeartRateBpm: heart.restingHeartRateBpm,
+      maxHeartRateBpmLast24h: Math.max(
+        heart.latestHeartRateBpm ?? 0,
+        ...((heart.heartRateSeriesLast24h ?? []).map(item => item.value))
+      ),
+      minHeartRateBpmLast24h:
+        heart.heartRateSeriesLast24h && heart.heartRateSeriesLast24h.length > 0
+          ? Math.min(...heart.heartRateSeriesLast24h.map(item => item.value))
+          : undefined,
+      heartRateWarning,
+      heartRateSeriesLast24h: heart.heartRateSeriesLast24h,
+    },
+    oxygen: {
+      latestSpO2Percent: oxygen.bloodOxygenPercent,
+      minSpO2PercentLast24h:
+        oxygen.bloodOxygenSeriesLast24h && oxygen.bloodOxygenSeriesLast24h.length > 0
+          ? Math.min(...oxygen.bloodOxygenSeriesLast24h.map(item => item.value))
+          : undefined,
+      spO2SeriesLast24h: oxygen.bloodOxygenSeriesLast24h,
+    },
+    stress: {
+      latestStressScore,
+      averageStressScoreToday: avgStressScore,
+      hrvMs: heart.heartRateVariabilityMs,
+      stressSeriesLast24h,
+    },
+    body: {
+      weightKg: body.bodyMassKg,
+      bmi: body.bodyMassKg ? round(body.bodyMassKg / (1.72 * 1.72), 1) : undefined,
+      bodyFatPercent: randomFloat(16.8, 25.6, 1),
+      skeletalMuscleKg: randomFloat(28.2, 36.8, 1),
+      bodyWaterPercent: randomFloat(51.2, 60.7, 1),
+      visceralFatLevel: randomFloat(5.2, 11.3, 1),
+    },
+    bloodPressure: {
+      latestSystolicMmhg: latestBloodPressure?.systolicMmhg,
+      latestDiastolicMmhg: latestBloodPressure?.diastolicMmhg,
+      bloodPressureSeriesLast30d,
+    },
+    workouts,
+  };
+
+  return {
+    source: 'huawei_health',
+    authorized: true,
+    generatedAt: now.toISOString(),
+    note: 'Android HuaweiHealth native module unavailable, returned Huawei-aligned fallback snapshot',
+    activity,
+    sleep,
+    heart,
+    oxygen,
+    metabolic,
+    environment,
+    body,
+    huawei,
+    workouts,
+  };
+}
+
+type RawHuaweiSnapshot = Partial<HealthKitAllData> & { source?: string };
+
+function normalizeHuaweiSnapshot(rawSnapshot: RawHuaweiSnapshot): HealthKitAllData {
+  const nowIso = new Date().toISOString();
+  const sourceRaw = typeof rawSnapshot.source === 'string' ? rawSnapshot.source.trim().toLowerCase() : 'huawei_health';
+  const normalizedSource: HealthSnapshotSource = sourceRaw === 'mock' ? 'mock' : 'huawei_health';
+  const fallbackNow = new Date();
+
+  const fallbackHuaweiData: HealthHuaweiData = {
+    dataWindowStart: new Date(fallbackNow.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+    dataWindowEnd: fallbackNow.toISOString(),
+    activity: rawSnapshot.activity
+      ? {
+          stepsToday: rawSnapshot.activity.stepsToday,
+          distanceKmToday: rawSnapshot.activity.distanceWalkingRunningKmToday,
+          caloriesKcalToday: rawSnapshot.activity.activeEnergyKcalToday,
+          floorsClimbedToday: rawSnapshot.activity.flightsClimbedToday,
+          activeMinutesToday: rawSnapshot.activity.exerciseMinutesToday,
+          moderateToVigorousMinutesToday: rawSnapshot.activity.exerciseMinutesToday,
+          standingHoursToday: rawSnapshot.activity.standHoursToday,
+          stepsSeriesToday: rawSnapshot.activity.stepsHourlySeriesToday,
+          caloriesSeriesToday: rawSnapshot.activity.activeEnergyHourlySeriesToday,
+          activeMinutesSeriesToday: rawSnapshot.activity.exerciseMinutesHourlySeriesToday,
+        }
+      : undefined,
+    sleep: rawSnapshot.sleep
+      ? {
+          asleepMinutesLast24h: rawSnapshot.sleep.asleepMinutesLast36h,
+          deepSleepMinutesLast24h: rawSnapshot.sleep.stageMinutesLast36h?.asleepDeepMinutes,
+          lightSleepMinutesLast24h:
+            (rawSnapshot.sleep.stageMinutesLast36h?.asleepCoreMinutes ?? 0) +
+            (rawSnapshot.sleep.stageMinutesLast36h?.asleepUnspecifiedMinutes ?? 0),
+          remSleepMinutesLast24h: rawSnapshot.sleep.stageMinutesLast36h?.asleepREMMinutes,
+          awakeMinutesLast24h: rawSnapshot.sleep.awakeMinutesLast36h,
+          sleepScore: rawSnapshot.sleep.sleepScore,
+          sleepSegmentsLast24h: rawSnapshot.sleep.samplesLast36h?.map(sample => ({
+            stage: toHuaweiSleepStage(sample.stage),
+            startDate: sample.startDate,
+            endDate: sample.endDate,
+            durationMinutes: round(Math.max(0, (new Date(sample.endDate).getTime() - new Date(sample.startDate).getTime()) / 60000), 1),
+          })),
+        }
+      : undefined,
+    heart: rawSnapshot.heart
+      ? {
+          latestHeartRateBpm: rawSnapshot.heart.latestHeartRateBpm,
+          restingHeartRateBpm: rawSnapshot.heart.restingHeartRateBpm,
+          heartRateSeriesLast24h: rawSnapshot.heart.heartRateSeriesLast24h,
+        }
+      : undefined,
+    oxygen: rawSnapshot.oxygen
+      ? {
+          latestSpO2Percent: rawSnapshot.oxygen.bloodOxygenPercent,
+          spO2SeriesLast24h: rawSnapshot.oxygen.bloodOxygenSeriesLast24h,
+        }
+      : undefined,
+    stress:
+      typeof rawSnapshot.heart?.heartRateVariabilityMs === 'number'
+        ? {
+            hrvMs: rawSnapshot.heart.heartRateVariabilityMs,
+          }
+        : undefined,
+    body: rawSnapshot.body
+      ? {
+          weightKg: rawSnapshot.body.bodyMassKg,
+        }
+      : undefined,
+    bloodPressure:
+      typeof rawSnapshot.heart?.systolicBloodPressureMmhg === 'number' &&
+      typeof rawSnapshot.heart?.diastolicBloodPressureMmhg === 'number'
+        ? {
+            latestSystolicMmhg: rawSnapshot.heart.systolicBloodPressureMmhg,
+            latestDiastolicMmhg: rawSnapshot.heart.diastolicBloodPressureMmhg,
+          }
+        : undefined,
+    workouts: rawSnapshot.workouts,
+  };
+
+  return {
+    source: normalizedSource,
+    authorized: Boolean(rawSnapshot.authorized ?? true),
+    generatedAt: rawSnapshot.generatedAt ?? nowIso,
+    note: rawSnapshot.note,
+    activity: rawSnapshot.activity,
+    sleep: rawSnapshot.sleep,
+    heart: rawSnapshot.heart,
+    oxygen: rawSnapshot.oxygen,
+    metabolic: rawSnapshot.metabolic,
+    environment: rawSnapshot.environment,
+    body: rawSnapshot.body,
+    huawei: rawSnapshot.huawei ?? fallbackHuaweiData,
+    workouts: rawSnapshot.workouts ?? rawSnapshot.huawei?.workouts ?? [],
+  };
+}
+
+async function loadHuaweiSnapshotForAndroid(): Promise<HealthKitAllData> {
+  if (!HuaweiHealthManager?.getHealthSnapshot) {
+    return buildHuaweiHealthFallbackSnapshot();
+  }
+
+  const isAvailable = HuaweiHealthManager.isHealthDataAvailable
+    ? await withTimeout(HuaweiHealthManager.isHealthDataAvailable(), 5000, '华为健康可用性检查超时，请重试')
+    : true;
+  if (!isAvailable) {
+    throw new Error('当前设备不支持华为健康数据读取');
+  }
+
+  const authorized = HuaweiHealthManager.requestAuthorization
+    ? await withTimeout(HuaweiHealthManager.requestAuthorization(), 15000, '华为健康授权超时，请在系统设置中确认后重试')
+    : true;
+  if (!authorized) {
+    throw new Error('未授予华为健康数据读取权限');
+  }
+
+  try {
+    const nativeSnapshot = await withTimeout(
+      HuaweiHealthManager.getHealthSnapshot(),
+      25000,
+      '华为健康数据读取超时，请稍后重试'
+    );
+    return normalizeHuaweiSnapshot(nativeSnapshot);
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : String(error ?? '');
+    if (/no data available for the specified predicate/i.test(rawMessage)) {
+      return normalizeHuaweiSnapshot({
+        source: 'huawei_health',
+        authorized: true,
+        generatedAt: new Date().toISOString(),
+        note: '部分华为健康指标在当前时间范围暂无数据，已返回可用数据字段',
+      });
+    }
+    throw error;
+  }
+}
+
 export async function authorizeHealthKit(): Promise<boolean> {
   if (Platform.OS !== 'ios') {
     return false;
@@ -664,7 +1075,15 @@ export async function authorizeHealthKit(): Promise<boolean> {
 }
 
 export async function loadHealthSnapshot(useMock = false): Promise<HealthKitAllData> {
-  if (useMock || Platform.OS !== 'ios') {
+  if (useMock) {
+    return buildMockSnapshot();
+  }
+
+  if (Platform.OS === 'android') {
+    return loadHuaweiSnapshotForAndroid();
+  }
+
+  if (Platform.OS !== 'ios') {
     return buildMockSnapshot();
   }
 

@@ -617,7 +617,7 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
             </View>
           </>
         ) : (
-          <Text style={styles.emptyHint}>暂无睡眠样本（可先点击“读取 Mock 数据”）</Text>
+          <Text style={styles.emptyHint}>暂无睡眠样本（可先点击“读取健康数据”）</Text>
         )}
 
         <View style={styles.metricRow}>

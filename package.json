@@ -9,6 +9,10 @@
   "scripts": {
     "android": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-android",
     "ios": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-ios",
+    "ios:release": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-ios --mode Release --no-packager",
+    "ios:device:release": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js run-ios --mode Release --device --no-packager",
+    "ios:device:ship": "bash ./scripts/ios-release-device.sh",
+    "ios:testflight": "bash ./scripts/ios-testflight.sh",
     "lint": "eslint .",
     "start": "./.tools/node-v22.11.0-darwin-arm64/bin/node ./node_modules/react-native/cli.js start",
     "test": "jest"

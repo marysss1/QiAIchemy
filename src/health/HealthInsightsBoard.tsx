@@ -57,6 +57,13 @@ function fmt(value: number | undefined | null, digits = 0): string {
   return value.toFixed(digits);
 }
 
+function hoursLabelFromMinutes(value: number | undefined | null, digits = 1): string {
+  if (value === undefined || value === null || Number.isNaN(value)) {
+    return '--';
+  }
+  return `${(value / 60).toFixed(digits)} 小时`;
+}
+
 function toLocalTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -329,9 +336,9 @@ function TaijiRings({
     },
     {
       label: '强身环',
-      value: exerciseMin,
-      target: exerciseGoalMin,
-      unit: 'min',
+      value: exerciseMin / 60,
+      target: exerciseGoalMin / 60,
+      unit: 'h',
       color: '#bc7d42',
       trackColor: '#efe0cd',
       radius: 72,
@@ -644,7 +651,7 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
           </View>
           <Text style={styles.apneaMeta}>
             近30天事件：{fmt(apnea?.eventCountLast30d)} 次 · 累计时长：
-            {fmt(apnea?.durationMinutesLast30d, 1)} 分钟
+            {hoursLabelFromMinutes(apnea?.durationMinutesLast30d)}
           </Text>
           <Text style={styles.apneaMeta}>
             最近一次：{apnea?.latestEventAt ? toLocalDateTime(apnea.latestEventAt) : '--'}
@@ -737,7 +744,7 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
           </View>
           <View style={styles.metricPill}>
             <Text style={styles.metricLabel}>日照时长</Text>
-            <Text style={styles.metricValue}>{fmt(snapshot.environment?.daylightMinutesToday, 0)} 分钟</Text>
+            <Text style={styles.metricValue}>{hoursLabelFromMinutes(snapshot.environment?.daylightMinutesToday)}</Text>
           </View>
           <View style={styles.metricPill}>
             <Text style={styles.metricLabel}>体重</Text>
@@ -751,7 +758,7 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
           <Text style={styles.workoutText}>
             最近一次：
             {latestWorkout
-              ? `${latestWorkout.activityTypeName ?? '运动'} · ${fmt(latestWorkout.durationMinutes)} 分钟`
+              ? `${latestWorkout.activityTypeName ?? '运动'} · ${hoursLabelFromMinutes(latestWorkout.durationMinutes)}`
               : '暂无'}
           </Text>
         </View>

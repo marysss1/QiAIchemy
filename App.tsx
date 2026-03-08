@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  AppState,
   Alert,
   KeyboardAvoidingView,
   Modal,
@@ -14,9 +13,11 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  Vibration,
   View,
 } from 'react-native';
 import {
+  loadAlertingMockHealthSnapshot,
   loadHealthSnapshot,
   type HealthSnapshot,
   type HealthWorkoutRecord,
@@ -25,12 +26,18 @@ import { HealthInsightsBoard } from './src/health/HealthInsightsBoard';
 
 type AuthMode = 'login' | 'register';
 type EditorMode = 'name' | 'password';
+type UserGender = 'female' | 'male' | 'non_binary' | 'prefer_not_to_say';
 
 type AuthUser = {
   id: string;
   username?: string;
   name?: string;
   email: string;
+  age?: number;
+  gender?: UserGender;
+  heightCm?: number;
+  weightKg?: number;
+  experimentConsent?: boolean;
 };
 
 type AppPanel = 'home' | 'chat';
@@ -46,27 +53,41 @@ type ChatMessage = {
   role: 'user' | 'assistant';
   content: string;
   citations?: Citation[];
+  createdAt?: string;
 };
+
+type ChatSessionType = 'manual' | 'login_health_review';
 
 type ChatSessionRecord = {
   id: number;
   title: string;
+  summary: string;
   createdAt: string;
   updatedAt: string;
+  sessionType: ChatSessionType;
+  riskAlertCodes: string[];
   messages: ChatMessage[];
 };
 
-type HealthRiskAlertSeverity = 'watch' | 'high';
-
-type HealthRiskAlert = {
+type HealthRiskSignal = {
   code: string;
-  severity: HealthRiskAlertSeverity;
   title: string;
-  message: string;
-  recommendation?: string;
-  value?: number;
+  severity: 'watch' | 'high';
+  firstDetectedAt: string;
+  lastDetectedAt: string;
+  occurrenceCount: number;
+  latestValue?: number;
   unit?: string;
-  triggeredAt?: string;
+  latestMessage: string;
+  latestRecommendation: string;
+};
+
+type HealthProfileRecord = {
+  latestSignals: HealthRiskSignal[];
+  trackedSignals: HealthRiskSignal[];
+  lastSnapshotGeneratedAt: string | null;
+  lastSnapshotSource: string;
+  llmHealthOverview?: string;
 };
 
 type SealLogoProps = {
@@ -75,14 +96,8 @@ type SealLogoProps = {
 };
 
 const API_BASE_URL = 'http://43.138.212.17:2818';
-const HEALTH_SYNC_INTERVAL_MS = 10 * 60 * 1000;
-const AUTO_HEALTH_SYNC_INITIAL_DELAY_MS = 12 * 1000;
-const AUTO_HEALTH_SYNC_JITTER_MS = 90 * 1000;
-const AUTO_UPLOAD_RETRY_DEDUP_MS = 2 * 60 * 1000;
 const AUTO_UPLOAD_SERIES_LIMIT = 48;
 const AUTO_UPLOAD_SLEEP_SAMPLES_LIMIT = 80;
-const MUTE_AUTO_HEALTH_SYNC = false;
-const MUTE_HEALTH_SNAPSHOT_POST = false;
 const SHOW_HEALTH_RAW_PANEL = false;
 // Debug switch: print full health snapshot JSON after each successful read.
 const LOG_HEALTH_SNAPSHOT_JSON = true;
@@ -99,11 +114,22 @@ const API_ERROR_MESSAGE_MAP: Record<string, string> = {
   'Route not found': '接口不存在',
   'Validation failed': '请求参数不合法',
   'login or email is required': '请输入用户名或邮箱',
+  'Experiment consent is required': '继续注册前必须同意参与实验',
 };
 
 const AVATAR_BG_COLORS = ['#a7342d', '#8a5d3b', '#7a4f2e', '#9c3a31', '#6c4d2f', '#8d6a45'];
 const AVATAR_BORDER_COLORS = ['#c89f74', '#b78d65', '#c39768', '#c88b79', '#b98f62', '#c6a57e'];
 const USERNAME_REGEX = /^[a-z0-9_][a-z0-9_.-]{2,23}$/;
+const GENDER_OPTIONS: Array<{ value: UserGender; label: string }> = [
+  { value: 'female', label: '女' },
+  { value: 'male', label: '男' },
+  { value: 'non_binary', label: '非二元' },
+  { value: 'prefer_not_to_say', label: '不透露' },
+];
+
+function getGenderLabel(value: UserGender | undefined): string {
+  return GENDER_OPTIONS.find(option => option.value === value)?.label ?? '--';
+}
 
 function normalizeApiBase(baseUrl = API_BASE_URL): string {
   return baseUrl.replace(/\/+$/, '');
@@ -147,6 +173,7 @@ function toPlainChatText(markdownText: string): string {
   );
 
   return withoutFences
+    .replace(/\[C\d+\]/g, '')
     .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/^>\s?/gm, '')
@@ -167,6 +194,18 @@ function formatMetric(value: number | undefined | null, digits = 0): string {
     return '--';
   }
   return value.toFixed(digits);
+}
+
+function toHours(valueMinutes: number | undefined | null, digits = 1): number | undefined {
+  if (valueMinutes === undefined || valueMinutes === null || Number.isNaN(valueMinutes)) {
+    return undefined;
+  }
+  return Number((valueMinutes / 60).toFixed(digits));
+}
+
+function formatHours(valueMinutes: number | undefined | null, digits = 1): string {
+  const hours = toHours(valueMinutes, digits);
+  return hours === undefined ? '--' : `${hours.toFixed(digits)} 小时`;
 }
 
 function formatDateLabel(value: string | undefined): string {
@@ -343,21 +382,6 @@ function compactSnapshotForAutoUpload(snapshot: HealthSnapshot): HealthSnapshot 
   };
 }
 
-function buildUploadDedupKey(snapshot: HealthSnapshot): string {
-  return [
-    snapshot.source,
-    snapshot.generatedAt,
-    snapshot.activity?.stepsToday ?? '-',
-    snapshot.activity?.activeEnergyKcalToday ?? '-',
-    snapshot.activity?.exerciseMinutesToday ?? '-',
-    snapshot.sleep?.sleepScore ?? '-',
-    snapshot.sleep?.asleepMinutesLast36h ?? '-',
-    snapshot.heart?.latestHeartRateBpm ?? '-',
-    snapshot.oxygen?.bloodOxygenPercent ?? '-',
-    snapshot.metabolic?.bloodGlucoseMgDl ?? '-',
-  ].join('|');
-}
-
 function buildSnapshotStateKey(snapshot: HealthSnapshot): string {
   const compact = compactSnapshotForAutoUpload(snapshot);
   const payload = JSON.stringify({
@@ -406,15 +430,77 @@ function buildSleepAdvicePrompt(snapshot: HealthSnapshot): string {
   return [
     '请基于以下健康快照给出中医导向的睡眠建议。',
     '要求：只输出 4 条内容（1. 睡眠状态判断 2. 今晚建议 3. 未来7天调理 4. 何时就医），每条简洁可执行。',
+    '所有涉及睡眠、日照、运动、卧床等时长，统一换算成小时并保留 1 位小数。',
     `睡眠评分: ${sleep?.sleepScore ?? '未知'}`,
-    `入睡时长(36h): ${sleep?.asleepMinutesLast36h ?? '未知'} 分钟`,
-    `在床时长(36h): ${sleep?.inBedMinutesLast36h ?? '未知'} 分钟`,
+    `入睡时长(36h): ${formatHours(sleep?.asleepMinutesLast36h)}`,
+    `在床时长(36h): ${formatHours(sleep?.inBedMinutesLast36h)}`,
     `睡眠呼吸暂停事件(30d): ${sleep?.apnea?.eventCountLast30d ?? '未知'}`,
     `睡眠呼吸暂停风险: ${sleep?.apnea?.riskLevel ?? '未知'}`,
     `最新心率: ${heart?.latestHeartRateBpm ?? '未知'} bpm`,
     `HRV: ${heart?.heartRateVariabilityMs ?? '未知'} ms`,
     `血氧: ${oxygen?.bloodOxygenPercent ?? '未知'} %`,
   ].join('\n');
+}
+
+function isSnapshotSparse(snapshot: HealthSnapshot): boolean {
+  const metricValues = [
+    snapshot.activity?.stepsToday,
+    snapshot.activity?.activeEnergyKcalToday,
+    snapshot.activity?.exerciseMinutesToday,
+    snapshot.activity?.standHoursToday,
+    snapshot.sleep?.asleepMinutesLast36h,
+    snapshot.sleep?.sleepScore,
+    snapshot.heart?.restingHeartRateBpm,
+    snapshot.heart?.heartRateVariabilityMs,
+    snapshot.heart?.vo2MaxMlKgMin,
+    snapshot.oxygen?.bloodOxygenPercent,
+    snapshot.metabolic?.bloodGlucoseMgDl,
+    snapshot.environment?.daylightMinutesToday,
+    snapshot.body?.bodyMassKg,
+    snapshot.huawei?.body?.bmi,
+  ].filter(value => typeof value === 'number' && Number.isFinite(value));
+
+  const hasWorkoutRecords = Boolean(snapshot.workouts && snapshot.workouts.length > 0);
+  return metricValues.length < 4 && !hasWorkoutRecords;
+}
+
+function formatSignalValue(signal: HealthRiskSignal): string {
+  if (signal.latestValue === undefined || signal.latestValue === null || Number.isNaN(signal.latestValue)) {
+    return '';
+  }
+  return signal.unit ? ` (${signal.latestValue}${signal.unit})` : ` (${signal.latestValue})`;
+}
+
+function buildProactiveHealthPrompt(signals: HealthRiskSignal[]): string {
+  const signalLines = signals.map(
+    (signal, index) =>
+      `${index + 1}. ${signal.title}${formatSignalValue(signal)}：${signal.latestMessage}；建议关注：${signal.latestRecommendation}`
+  );
+
+  return [
+    '系统在用户刚登录时自动读取了最新健康数据，并识别到一些值得主动干预的异常信号。',
+    '请你直接以中医健康助手身份发起一次主动关怀，不要先反问用户。',
+    '输出要求：',
+    '1. 先用“本次健康数据提示你目前主要有以下症状/异常线索：”开头，列出 3-6 条症状或异常。',
+    '2. 再用中医角度概括可能的失衡方向，例如气血不足、肝郁脾虚、痰湿内阻等，但不要下医疗诊断。',
+    '3. 再给出 4-6 条今天就能执行的调理建议，尽量量化。',
+    '4. 最后补 1 条红旗提醒，说明什么情况下应线下就医。',
+    '5. 全程中文，语气像系统主动提醒，避免空泛套话。',
+    '6. 所有时长类数据统一写成小时，不要再写“多少分钟”。',
+    '',
+    '当前识别到的异常：',
+    ...signalLines,
+  ].join('\n');
+}
+
+function haveSameRiskAlertCodes(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  const leftSorted = [...left].sort();
+  const rightSorted = [...right].sort();
+  return leftSorted.every((value, index) => value === rightSorted[index]);
 }
 
 function hashCode(input: string): number {
@@ -517,12 +603,12 @@ function SnapshotRawPanel({ snapshot }: { snapshot: HealthSnapshot }): React.JSX
     {
       label: '活动趋势点',
       value: `${snapshot.activity?.stepsHourlySeriesToday?.length ?? 0} / ${snapshot.activity?.activeEnergyHourlySeriesToday?.length ?? 0} / ${snapshot.activity?.exerciseMinutesHourlySeriesToday?.length ?? 0}`,
-      note: `步数/活动能量/运动分钟 · 圆环目标 Move ${formatMetric(snapshot.activity?.activeEnergyGoalKcal)} kcal / Exercise ${formatMetric(snapshot.activity?.exerciseGoalMinutes)} min / Stand ${formatMetric(snapshot.activity?.standGoalHours)} h`,
+      note: `步数/活动能量/运动时长 · 圆环目标 Move ${formatMetric(snapshot.activity?.activeEnergyGoalKcal)} kcal / Exercise ${formatHours(snapshot.activity?.exerciseGoalMinutes)} / Stand ${formatMetric(snapshot.activity?.standGoalHours)} 小时`,
     },
     {
       label: '睡眠样本',
       value: `${snapshot.sleep?.samplesLast36h?.length ?? 0}`,
-      note: `分期统计: Core ${formatMetric(snapshot.sleep?.stageMinutesLast36h?.asleepCoreMinutes)} min, Deep ${formatMetric(snapshot.sleep?.stageMinutesLast36h?.asleepDeepMinutes)} min, REM ${formatMetric(snapshot.sleep?.stageMinutesLast36h?.asleepREMMinutes)} min, Apnea ${formatMetric(snapshot.sleep?.apnea?.eventCountLast30d)} 次`,
+      note: `分期统计: Core ${formatHours(snapshot.sleep?.stageMinutesLast36h?.asleepCoreMinutes)}, Deep ${formatHours(snapshot.sleep?.stageMinutesLast36h?.asleepDeepMinutes)}, REM ${formatHours(snapshot.sleep?.stageMinutesLast36h?.asleepREMMinutes)}, Apnea ${formatMetric(snapshot.sleep?.apnea?.eventCountLast30d)} 次`,
     },
     {
       label: '心率趋势点',
@@ -542,7 +628,7 @@ function SnapshotRawPanel({ snapshot }: { snapshot: HealthSnapshot }): React.JSX
     {
       label: '环境趋势点',
       value: `${snapshot.environment?.daylightSeriesLast7d?.length ?? 0}`,
-      note: `今日日照: ${formatMetric(snapshot.environment?.daylightMinutesToday)} 分钟`,
+      note: `今日日照: ${formatHours(snapshot.environment?.daylightMinutesToday)}`,
     },
     {
       label: '体征趋势点',
@@ -575,7 +661,7 @@ function SnapshotRawPanel({ snapshot }: { snapshot: HealthSnapshot }): React.JSX
           latestWorkouts.map((workout: HealthWorkoutRecord, index) => (
             <Text key={`${workout.startDate ?? 'unknown'}-${index}`} style={styles.rawWorkoutText}>
               {index + 1}. {workout.activityTypeName ?? workout.activityTypeCode ?? '未知'} ·
-              时长 {formatMetric(workout.durationMinutes)} 分钟 ·
+              时长 {formatHours(workout.durationMinutes)} ·
               能量 {formatMetric(workout.totalEnergyKcal)} kcal ·
               距离 {formatMetric(workout.totalDistanceKm, 2)} km
             </Text>
@@ -586,44 +672,81 @@ function SnapshotRawPanel({ snapshot }: { snapshot: HealthSnapshot }): React.JSX
   );
 }
 
-function readRememberedLogin(): { enabled: boolean; loginId: string; password: string } {
+function getSettingsBridge():
+  | {
+      get: (key: string) => unknown;
+      set: (settings: Record<string, unknown>) => void;
+    }
+  | null {
   if (Platform.OS !== 'ios') {
-    return { enabled: false, loginId: '', password: '' };
+    return null;
   }
 
-  const rawEnabled = Settings.get(REMEMBER_LOGIN_SETTINGS_KEY);
-  const enabled =
-    rawEnabled === undefined || rawEnabled === null ? true : !(rawEnabled === false || rawEnabled === 'false');
+  const settingsBridge = Settings as
+    | {
+        get?: (key: string) => unknown;
+        set?: (settings: Record<string, unknown>) => void;
+      }
+    | undefined;
 
-  const rawLoginId = Settings.get(REMEMBER_LOGIN_ID_SETTINGS_KEY);
-  const rawPassword = Settings.get(REMEMBER_PASSWORD_SETTINGS_KEY);
+  if (!settingsBridge || typeof settingsBridge.get !== 'function' || typeof settingsBridge.set !== 'function') {
+    return null;
+  }
 
   return {
-    enabled,
-    loginId: typeof rawLoginId === 'string' ? rawLoginId : '',
-    password: typeof rawPassword === 'string' ? rawPassword : '',
+    get: (key: string) => settingsBridge.get!(key),
+    set: (settings: Record<string, unknown>) => settingsBridge.set!(settings),
   };
 }
 
+function readRememberedLogin(): { enabled: boolean; loginId: string; password: string } {
+  const settingsBridge = getSettingsBridge();
+  if (!settingsBridge) {
+    return { enabled: false, loginId: '', password: '' };
+  }
+
+  try {
+    const rawEnabled = settingsBridge.get(REMEMBER_LOGIN_SETTINGS_KEY);
+    const enabled =
+      rawEnabled === undefined || rawEnabled === null ? true : !(rawEnabled === false || rawEnabled === 'false');
+
+    const rawLoginId = settingsBridge.get(REMEMBER_LOGIN_ID_SETTINGS_KEY);
+    const rawPassword = settingsBridge.get(REMEMBER_PASSWORD_SETTINGS_KEY);
+
+    return {
+      enabled,
+      loginId: typeof rawLoginId === 'string' ? rawLoginId : '',
+      password: typeof rawPassword === 'string' ? rawPassword : '',
+    };
+  } catch {
+    return { enabled: false, loginId: '', password: '' };
+  }
+}
+
 function persistRememberedLogin(enabled: boolean, loginId = '', password = ''): void {
-  if (Platform.OS !== 'ios') {
+  const settingsBridge = getSettingsBridge();
+  if (!settingsBridge) {
     return;
   }
 
-  if (!enabled) {
-    Settings.set({
-      [REMEMBER_LOGIN_SETTINGS_KEY]: false,
-      [REMEMBER_LOGIN_ID_SETTINGS_KEY]: '',
-      [REMEMBER_PASSWORD_SETTINGS_KEY]: '',
+  try {
+    if (!enabled) {
+      settingsBridge.set({
+        [REMEMBER_LOGIN_SETTINGS_KEY]: false,
+        [REMEMBER_LOGIN_ID_SETTINGS_KEY]: '',
+        [REMEMBER_PASSWORD_SETTINGS_KEY]: '',
+      });
+      return;
+    }
+
+    settingsBridge.set({
+      [REMEMBER_LOGIN_SETTINGS_KEY]: true,
+      [REMEMBER_LOGIN_ID_SETTINGS_KEY]: loginId.trim(),
+      [REMEMBER_PASSWORD_SETTINGS_KEY]: password,
     });
+  } catch {
     return;
   }
-
-  Settings.set({
-    [REMEMBER_LOGIN_SETTINGS_KEY]: true,
-    [REMEMBER_LOGIN_ID_SETTINGS_KEY]: loginId.trim(),
-    [REMEMBER_PASSWORD_SETTINGS_KEY]: password,
-  });
 }
 
 function App(): React.JSX.Element {
@@ -643,6 +766,12 @@ function LoginScreen(): React.JSX.Element {
   const [username, setUsername] = useState('');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [age, setAge] = useState('');
+  const [gender, setGender] = useState<UserGender | ''>('');
+  const [heightCm, setHeightCm] = useState('');
+  const [weightKg, setWeightKg] = useState('');
+  const [experimentConsent, setExperimentConsent] = useState(false);
+  const [consentModalVisible, setConsentModalVisible] = useState(false);
   const [password, setPassword] = useState(rememberedLoginAtLaunch.password);
   const [confirmPassword, setConfirmPassword] = useState('');
   const [usernameChecking, setUsernameChecking] = useState(false);
@@ -656,12 +785,7 @@ function LoginScreen(): React.JSX.Element {
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthSnapshot, setHealthSnapshot] = useState<HealthSnapshot | null>(null);
   const [healthError, setHealthError] = useState('');
-  const [healthAuthorized, setHealthAuthorized] = useState<boolean | null>(null);
-  const [autoHealthSyncEnabled, setAutoHealthSyncEnabled] = useState(false);
-  const [autoHealthSyncing, setAutoHealthSyncing] = useState(false);
-  const [lastHealthSyncAt, setLastHealthSyncAt] = useState<string | null>(null);
-  const [lastHealthUploadAt, setLastHealthUploadAt] = useState<string | null>(null);
-  const [lastHealthSource, setLastHealthSource] = useState<'healthkit' | 'huawei_health' | 'mock' | null>(null);
+  const [healthProfile, setHealthProfile] = useState<HealthProfileRecord | null>(null);
   const [sleepAdvice, setSleepAdvice] = useState('');
   const [sleepAdviceLoading, setSleepAdviceLoading] = useState(false);
   const [sleepAdviceUpdatedAt, setSleepAdviceUpdatedAt] = useState<string | null>(null);
@@ -673,8 +797,6 @@ function LoginScreen(): React.JSX.Element {
   const [chatSessionId, setChatSessionId] = useState(0);
   const [chatSessions, setChatSessions] = useState<ChatSessionRecord[]>([]);
   const [chatDrawerVisible, setChatDrawerVisible] = useState(false);
-  const [riskAlertPermission, setRiskAlertPermission] = useState<boolean | null>(null);
-  const [lastRiskAlertFingerprint, setLastRiskAlertFingerprint] = useState<string | null>(null);
 
   const [profilePanelVisible, setProfilePanelVisible] = useState(false);
   const [editorVisible, setEditorVisible] = useState(false);
@@ -682,33 +804,24 @@ function LoginScreen(): React.JSX.Element {
   const [editorValue, setEditorValue] = useState('');
   const [avatarSeed, setAvatarSeed] = useState(() => Math.floor(Math.random() * 100000));
   const chatScrollRef = useRef<ScrollView | null>(null);
-  const appStateRef = useRef(AppState.currentState);
   const healthSyncInFlightRef = useRef(false);
-  const healthSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastUploadDedupKeyRef = useRef<string | null>(null);
-  const lastUploadAttemptAtRef = useRef(0);
   const lastSnapshotStateKeyRef = useRef<string | null>(null);
   const latestSnapshotRef = useRef<HealthSnapshot | null>(null);
   const lastSleepStateKeyRef = useRef<string | null>(null);
   const sleepAdviceInFlightRef = useRef(false);
+  const lastChatHealthSessionIdRef = useRef<number | null>(null);
+  const lastBootstrapTokenRef = useRef<string | null>(null);
 
   const canUseHealth = Boolean(token);
   const isAndroid = Platform.OS === 'android';
   const healthPanelTitle = isAndroid ? '华为健康全量数据读取' : 'HealthKit 全量数据读取';
   const healthHintText = isAndroid
-    ? '点击读取华为健康数据或 Mock 数据，读取后进入可视化页面。'
-    : '点击读取 HealthKit 真实数据，读取后进入可视化页面。';
+    ? '测试模式下可手动读取华为健康数据或 Mock 数据做可视化验证；登录后会自动同步一次健康数据，正式聊天会在每个新会话首条消息前再读取一次。'
+    : '测试模式下可手动读取 HealthKit 真实数据做可视化验证；登录后会自动同步一次健康数据，正式聊天会在每个新会话首条消息前再读取一次。';
   const healthRealButtonText = isAndroid ? '读取华为健康数据' : '读取真实数据';
   const visualPlaceholderText = isAndroid
-    ? '点击“读取华为健康数据”或“读取 Mock 数据”后，将进入中国风健康数据可视化页面（可上下滑动）。'
-    : '点击“读取真实数据”后，将进入中国风健康数据可视化页面（可上下滑动）。';
-
-  const clearHealthSyncTimer = useCallback(() => {
-    if (healthSyncTimerRef.current) {
-      clearTimeout(healthSyncTimerRef.current);
-      healthSyncTimerRef.current = null;
-    }
-  }, []);
+    ? '测试模式下点击“读取华为健康数据”或“读取 Mock 数据”后，将进入健康数据可视化页面；登录与正式聊天场景都会自动同步健康数据。'
+    : '测试模式下点击“读取真实数据”后，将进入健康数据可视化页面；登录与正式聊天场景都会自动同步健康数据。';
 
   const avatar = useMemo(() => buildAvatar(currentUser, avatarSeed), [currentUser, avatarSeed]);
   const normalizedUsername = username.trim().toLowerCase();
@@ -721,9 +834,15 @@ function LoginScreen(): React.JSX.Element {
       (normalizedUsername.length > 0 && !USERNAME_REGEX.test(normalizedUsername)));
   const currentSessionTitle = useMemo(() => {
     if (chatSessionId <= 0) {
-      return '会话 #1';
+      return '中医智能对话';
     }
-    return chatSessions.find(item => item.id === chatSessionId)?.title ?? `会话 #${chatSessionId}`;
+    return chatSessions.find(item => item.id === chatSessionId)?.title ?? '新对话';
+  }, [chatSessionId, chatSessions]);
+  const currentSessionType = useMemo(() => {
+    if (chatSessionId <= 0) {
+      return 'manual' as ChatSessionType;
+    }
+    return chatSessions.find(item => item.id === chatSessionId)?.sessionType ?? 'manual';
   }, [chatSessionId, chatSessions]);
 
   const createMessageId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -734,32 +853,41 @@ function LoginScreen(): React.JSX.Element {
     });
   };
 
-  const getSessionTitle = useCallback((messages: ChatMessage[], sessionId: number): string => {
+  const getSessionTitle = useCallback((messages: ChatMessage[]): string => {
     const firstUser = messages.find(item => item.role === 'user');
     if (!firstUser?.content) {
-      return `会话 #${sessionId}`;
+      return '新对话';
     }
 
     const normalized = firstUser.content.replace(/\s+/g, ' ').trim();
     if (!normalized) {
-      return `会话 #${sessionId}`;
+      return '新对话';
     }
 
     return normalized.length > 16 ? `${normalized.slice(0, 16)}...` : normalized;
   }, []);
 
   const upsertChatSession = useCallback(
-    (sessionId: number, messages: ChatMessage[], createdAtHint?: string) => {
+    (
+      sessionId: number,
+      messages: ChatMessage[],
+      options?: Partial<Pick<ChatSessionRecord, 'createdAt' | 'summary' | 'sessionType' | 'riskAlertCodes' | 'title'>>
+    ) => {
       const nowIso = new Date().toISOString();
       setChatSessions(prev => {
-        const nextTitle = getSessionTitle(messages, sessionId);
         const existing = prev.find(item => item.id === sessionId);
-        const createdAt = existing?.createdAt ?? createdAtHint ?? nowIso;
+        const createdAt = existing?.createdAt ?? options?.createdAt ?? nowIso;
+        const sameMessages = existing ? JSON.stringify(existing.messages) === JSON.stringify(messages) : false;
+        const nextTitle =
+          options?.title ?? (sameMessages ? existing?.title ?? getSessionTitle(messages) : getSessionTitle(messages));
         const updatedRecord: ChatSessionRecord = {
           id: sessionId,
           title: nextTitle,
+          summary: options?.summary ?? existing?.summary ?? '',
           createdAt,
-          updatedAt: nowIso,
+          updatedAt: sameMessages ? existing?.updatedAt ?? nowIso : nowIso,
+          sessionType: options?.sessionType ?? existing?.sessionType ?? 'manual',
+          riskAlertCodes: options?.riskAlertCodes ?? existing?.riskAlertCodes ?? [],
           messages,
         };
         const merged = [updatedRecord, ...prev.filter(item => item.id !== sessionId)];
@@ -775,14 +903,25 @@ function LoginScreen(): React.JSX.Element {
       showAlert = false,
       introText,
       title,
-    }: { showAlert?: boolean; introText?: string; title?: string } = {}) => {
-      const nextSessionId = chatSessionId + 1;
+      summary,
+      sessionType = 'manual',
+      riskAlertCodes = [],
+    }: {
+      showAlert?: boolean;
+      introText?: string;
+      title?: string;
+      summary?: string;
+      sessionType?: ChatSessionType;
+      riskAlertCodes?: string[];
+    } = {}) => {
+      const nextSessionId = Math.max(chatSessionId, ...chatSessions.map(item => item.id), 0) + 1;
       const initialMessage: ChatMessage = {
         id: createMessageId(),
         role: 'assistant',
         content:
           introText ??
           '新对话已开始。请告诉我你最近最困扰的健康问题，我会结合中医思路给出7天可执行建议。',
+        createdAt: new Date().toISOString(),
       };
 
       setChatSessionId(nextSessionId);
@@ -794,9 +933,12 @@ function LoginScreen(): React.JSX.Element {
       setChatSessions(prev => {
         const initialRecord: ChatSessionRecord = {
           id: nextSessionId,
-          title: title ?? `会话 #${nextSessionId}`,
+          title: title ?? '新对话',
+          summary: summary ?? '',
           createdAt,
           updatedAt: createdAt,
+          sessionType,
+          riskAlertCodes,
           messages: [initialMessage],
         };
         const merged = [initialRecord, ...prev.filter(item => item.id !== nextSessionId)];
@@ -810,42 +952,8 @@ function LoginScreen(): React.JSX.Element {
 
       return { sessionId: nextSessionId, initialMessage };
     },
-    [chatSessionId]
+    [chatSessionId, chatSessions]
   );
-
-  const askRiskAlertPermission = useCallback((): Promise<boolean> => {
-    return new Promise(resolve => {
-      Alert.alert(
-        '风险弹窗权限',
-        '检测到健康异常时，是否允许应用弹窗提醒并引导你进入新对话？',
-        [
-          {
-            text: '暂不允许',
-            style: 'cancel',
-            onPress: () => {
-              setRiskAlertPermission(false);
-              resolve(false);
-            },
-          },
-          {
-            text: '允许',
-            onPress: () => {
-              setRiskAlertPermission(true);
-              resolve(true);
-            },
-          },
-        ],
-        { cancelable: false }
-      );
-    });
-  }, []);
-
-  const ensureRiskAlertPermission = useCallback(async (): Promise<boolean> => {
-    if (riskAlertPermission !== null) {
-      return riskAlertPermission;
-    }
-    return askRiskAlertPermission();
-  }, [askRiskAlertPermission, riskAlertPermission]);
 
   const checkUsernameAvailable = async (
     rawUsername: string
@@ -875,6 +983,268 @@ function LoginScreen(): React.JSX.Element {
 
     return { available: data.available };
   };
+
+  const fetchHealthProfile = useCallback(async (): Promise<HealthProfileRecord | null> => {
+    if (!token) {
+      return null;
+    }
+
+    const normalizedBase = normalizeApiBase();
+    const response = await fetch(`${normalizedBase}/api/health/profile`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    const { data } = await readApiResponse<{ message?: string; profile?: HealthProfileRecord }>(response);
+
+    if (!response.ok || !data?.profile) {
+      const fallbackMessage =
+        response.status >= 500
+          ? `服务暂时不可用（HTTP ${response.status}）`
+          : `健康画像加载失败（HTTP ${response.status}）`;
+      throw new Error(localizeErrorMessage(data?.message ?? '', fallbackMessage));
+    }
+
+    return data.profile;
+  }, [token]);
+
+  const fetchStoredChatSessions = useCallback(async (): Promise<ChatSessionRecord[]> => {
+    if (!token) {
+      return [];
+    }
+
+    const normalizedBase = normalizeApiBase();
+    const response = await fetch(`${normalizedBase}/api/agent/sessions`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    const { data } = await readApiResponse<{ message?: string; sessions?: ChatSessionRecord[] }>(response);
+
+    if (!response.ok || !Array.isArray(data?.sessions)) {
+      const fallbackMessage =
+        response.status >= 500
+          ? `服务暂时不可用（HTTP ${response.status}）`
+          : `历史会话加载失败（HTTP ${response.status}）`;
+      throw new Error(localizeErrorMessage(data?.message ?? '', fallbackMessage));
+    }
+
+    return data.sessions.map(session => ({
+      id: session.id,
+      title: session.title,
+      summary: session.summary ?? '',
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      sessionType: session.sessionType ?? 'manual',
+      riskAlertCodes: session.riskAlertCodes ?? [],
+      messages: (session.messages ?? []).map(message => ({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        citations: message.citations,
+        createdAt: message.createdAt,
+      })),
+    }));
+  }, [token]);
+
+  const persistChatSessionToServer = useCallback(
+    async (sessionId: number, messages: ChatMessage[], meta?: Partial<ChatSessionRecord>): Promise<ChatSessionRecord | null> => {
+      if (!token || sessionId <= 0 || messages.length === 0) {
+        return null;
+      }
+
+      const normalizedBase = normalizeApiBase();
+      const response = await fetch(`${normalizedBase}/api/agent/sessions/${sessionId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          sessionType: meta?.sessionType ?? 'manual',
+          riskAlertCodes: meta?.riskAlertCodes ?? [],
+          messages: messages.map(message => ({
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            citations: message.citations,
+            createdAt: message.createdAt ?? new Date().toISOString(),
+          })),
+        }),
+      });
+
+      const { data } = await readApiResponse<{ message?: string; session?: ChatSessionRecord }>(response);
+      if (!response.ok || !data?.session) {
+        const fallbackMessage =
+          response.status >= 500
+            ? `服务暂时不可用（HTTP ${response.status}）`
+            : `会话保存失败（HTTP ${response.status}）`;
+        throw new Error(localizeErrorMessage(data?.message ?? '', fallbackMessage));
+      }
+
+      const nextSession: ChatSessionRecord = {
+        id: data.session.id,
+        title: data.session.title,
+        summary: data.session.summary ?? '',
+        createdAt: data.session.createdAt,
+        updatedAt: data.session.updatedAt,
+        sessionType: data.session.sessionType ?? meta?.sessionType ?? 'manual',
+        riskAlertCodes: data.session.riskAlertCodes ?? meta?.riskAlertCodes ?? [],
+        messages: (data.session.messages ?? []).map(message => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          citations: message.citations,
+          createdAt: message.createdAt,
+        })),
+      };
+
+      upsertChatSession(nextSession.id, nextSession.messages, nextSession);
+      return nextSession;
+    },
+    [token, upsertChatSession]
+  );
+
+  const uploadHealthSnapshotToServer = useCallback(
+    async (
+      snapshot: HealthSnapshot,
+      syncReason: 'manual' | 'auto' | 'chat'
+    ): Promise<{ alerts: HealthRiskSignal[] }> => {
+      if (!token) {
+        return { alerts: [] };
+      }
+
+      const normalizedBase = normalizeApiBase();
+      const response = await fetch(`${normalizedBase}/api/health/snapshots`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          syncReason,
+          snapshot: compactSnapshotForAutoUpload(snapshot),
+        }),
+      });
+      const { data } = await readApiResponse<{ message?: string; alerts?: HealthRiskSignal[] }>(response);
+
+      if (!response.ok) {
+        const fallbackMessage =
+          response.status >= 500
+            ? `服务暂时不可用（HTTP ${response.status}）`
+            : `健康数据同步失败（HTTP ${response.status}）`;
+        throw new Error(localizeErrorMessage(data?.message ?? '', fallbackMessage));
+      }
+
+      return {
+        alerts: Array.isArray(data?.alerts) ? data.alerts : [],
+      };
+    },
+    [token]
+  );
+
+  const startProactiveLoginReview = useCallback(
+    async (
+      snapshot: HealthSnapshot,
+      signals: HealthRiskSignal[],
+      existingSessions: ChatSessionRecord[]
+    ): Promise<void> => {
+      if (!token || signals.length === 0) {
+        return;
+      }
+
+      const normalizedBase = normalizeApiBase();
+      const signalCodes = signals.map(item => item.code);
+      const reusableSession = existingSessions.find(session => {
+        if (session.sessionType !== 'login_health_review' || session.messages.length !== 1) {
+          return false;
+        }
+        if (!haveSameRiskAlertCodes(session.riskAlertCodes ?? [], signalCodes)) {
+          return false;
+        }
+        const lastUpdatedAt = new Date(session.updatedAt).getTime();
+        if (!Number.isFinite(lastUpdatedAt)) {
+          return false;
+        }
+        return Date.now() - lastUpdatedAt < 12 * 60 * 60 * 1000;
+      });
+      const nextSessionId =
+        reusableSession?.id ?? Math.max(chatSessionId, ...existingSessions.map(item => item.id), 0) + 1;
+      Vibration.vibrate();
+      setActivePanel('chat');
+      setTestMode(false);
+      setChatDrawerVisible(false);
+      setProfilePanelVisible(false);
+      setChatLoading(true);
+      try {
+        const response = await fetch(`${normalizedBase}/api/agent/chat/health`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            message: buildProactiveHealthPrompt(signals),
+            topK: 6,
+            history: [],
+            latestHealthSnapshot: snapshot,
+          }),
+        });
+
+        const { data } = await readApiResponse<{
+          message?: string;
+          answer?: string;
+          citations?: Array<{ label?: string; sourceTitle?: string; sectionTitle?: string }>;
+        }>(response);
+
+        if (!response.ok || typeof data?.answer !== 'string') {
+          const fallbackMessage =
+            response.status >= 500
+              ? `服务暂时不可用（HTTP ${response.status}）`
+              : `主动健康分析失败（HTTP ${response.status}）`;
+          throw new Error(localizeErrorMessage(data?.message ?? '', fallbackMessage));
+        }
+
+        const assistantMessage: ChatMessage = {
+          id: createMessageId(),
+          role: 'assistant',
+          content: toPlainChatText(data.answer),
+          citations: (data.citations ?? [])
+            .filter(item => item.label && item.sourceTitle)
+            .map(item => ({
+              label: item.label as string,
+              sourceTitle: item.sourceTitle as string,
+              sectionTitle: item.sectionTitle,
+            })),
+          createdAt: new Date().toISOString(),
+        };
+        const assistantCreatedAt = assistantMessage.createdAt ?? new Date().toISOString();
+
+        const nextRecord: ChatSessionRecord = {
+          id: nextSessionId,
+          title: '登录健康分析',
+          summary: signals.slice(0, 2).map(item => item.title).join('、'),
+          createdAt: reusableSession?.createdAt ?? assistantCreatedAt,
+          updatedAt: assistantCreatedAt,
+          sessionType: 'login_health_review',
+          riskAlertCodes: signalCodes,
+          messages: [assistantMessage],
+        };
+
+        setChatSessionId(nextSessionId);
+        setChatMessages(nextRecord.messages);
+        setChatInput('');
+        upsertChatSession(nextRecord.id, nextRecord.messages, nextRecord);
+        await persistChatSessionToServer(nextRecord.id, nextRecord.messages, nextRecord);
+        lastChatHealthSessionIdRef.current = nextSessionId;
+      } finally {
+        setChatLoading(false);
+      }
+    },
+    [token, chatSessionId, persistChatSessionToServer, upsertChatSession]
+  );
 
   useEffect(() => {
     if (mode !== 'register') {
@@ -964,6 +1334,26 @@ function LoginScreen(): React.JSX.Element {
       return;
     }
 
+    if (mode === 'register' && !age.trim()) {
+      Alert.alert('提示', '注册模式下请填写年龄');
+      return;
+    }
+
+    if (mode === 'register' && !gender) {
+      Alert.alert('提示', '注册模式下请选择性别');
+      return;
+    }
+
+    if (mode === 'register' && !heightCm.trim()) {
+      Alert.alert('提示', '注册模式下请填写身高');
+      return;
+    }
+
+    if (mode === 'register' && !weightKg.trim()) {
+      Alert.alert('提示', '注册模式下请填写体重');
+      return;
+    }
+
     if (mode === 'register' && !USERNAME_REGEX.test(normalizedUsername)) {
       Alert.alert('提示', '用户名需为 3-24 位小写字母/数字，可包含 _ . -');
       return;
@@ -989,11 +1379,35 @@ function LoginScreen(): React.JSX.Element {
       return;
     }
 
+    const parsedAge = Number(age.trim());
+    const parsedHeightCm = Number(heightCm.trim());
+    const parsedWeightKg = Number(weightKg.trim());
+
+    if (mode === 'register' && (!Number.isFinite(parsedAge) || parsedAge <= 0 || parsedAge > 120)) {
+      Alert.alert('提示', '年龄请输入 1-120 之间的数字');
+      return;
+    }
+
+    if (mode === 'register' && (!Number.isFinite(parsedHeightCm) || parsedHeightCm < 50 || parsedHeightCm > 250)) {
+      Alert.alert('提示', '身高请输入 50-250 cm 之间的数字');
+      return;
+    }
+
+    if (mode === 'register' && (!Number.isFinite(parsedWeightKg) || parsedWeightKg < 20 || parsedWeightKg > 300)) {
+      Alert.alert('提示', '体重请输入 20-300 kg 之间的数字');
+      return;
+    }
+
+    if (mode === 'register' && !experimentConsent) {
+      setConsentModalVisible(true);
+      return;
+    }
+
     setLoading(true);
     try {
       const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
 
-      let body: Record<string, string>;
+      let body: Record<string, string | number | boolean>;
       if (mode === 'login') {
         body = { login: normalizedLoginId, password: password.trim() };
       } else {
@@ -1005,6 +1419,11 @@ function LoginScreen(): React.JSX.Element {
           username: normalizedUsername,
           email: normalizedEmail,
           password: password.trim(),
+          age: parsedAge,
+          gender,
+          heightCm: parsedHeightCm,
+          weightKg: parsedWeightKg,
+          experimentConsent,
           ...(name.trim() ? { name: name.trim() } : {}),
         };
       }
@@ -1043,15 +1462,16 @@ function LoginScreen(): React.JSX.Element {
       setLoginId(rememberCredentials ? loginIdToRemember : '');
       setUsername('');
       setEmail('');
+      setAge('');
+      setGender('');
+      setHeightCm('');
+      setWeightKg('');
+      setExperimentConsent(false);
+      setConsentModalVisible(false);
       setTestMode(false);
       setHealthSnapshot(null);
       setHealthError('');
-      setHealthAuthorized(null);
-      setAutoHealthSyncEnabled(false);
-      setAutoHealthSyncing(false);
-      setLastHealthSyncAt(null);
-      setLastHealthUploadAt(null);
-      setLastHealthSource(null);
+      setHealthProfile(null);
       setVisualReady(false);
       setActivePanel('home');
       setChatInput('');
@@ -1060,9 +1480,8 @@ function LoginScreen(): React.JSX.Element {
       setChatSessionId(0);
       setChatSessions([]);
       setChatDrawerVisible(false);
-      setRiskAlertPermission(null);
-      setLastRiskAlertFingerprint(null);
       setProfilePanelVisible(false);
+      lastChatHealthSessionIdRef.current = null;
 
       Alert.alert('成功', mode === 'login' ? '登录成功' : '注册并登录成功');
     } catch (error) {
@@ -1107,58 +1526,6 @@ function LoginScreen(): React.JSX.Element {
       setLoading(false);
     }
   };
-
-  const uploadHealthSnapshotToBackend = useCallback(
-    async (
-      snapshot: HealthSnapshot,
-      reason: 'manual' | 'auto' | 'chat'
-    ): Promise<{ uploadedAt: string; alerts: HealthRiskAlert[] }> => {
-      if (!token) {
-        throw new Error('未登录，无法上传健康快照');
-      }
-
-      const snapshotForUpload = reason === 'auto' ? compactSnapshotForAutoUpload(snapshot) : snapshot;
-      const dedupKey = buildUploadDedupKey(snapshotForUpload);
-      const nowMs = Date.now();
-      if (
-        reason === 'auto' &&
-        lastUploadDedupKeyRef.current === dedupKey &&
-        nowMs - lastUploadAttemptAtRef.current < AUTO_UPLOAD_RETRY_DEDUP_MS
-      ) {
-        return { uploadedAt: new Date(lastUploadAttemptAtRef.current).toISOString(), alerts: [] };
-      }
-      lastUploadDedupKeyRef.current = dedupKey;
-      lastUploadAttemptAtRef.current = nowMs;
-
-      const normalizedBase = normalizeApiBase();
-      const response = await fetch(`${normalizedBase}/api/health/snapshots`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          snapshot: snapshotForUpload,
-          syncReason: reason,
-        }),
-      });
-
-      const { data } = await readApiResponse<{
-        message?: string;
-        uploadedAt?: string;
-        alerts?: HealthRiskAlert[];
-      }>(response);
-      if (!response.ok || !data?.uploadedAt) {
-        const fallbackMessage =
-          response.status >= 500
-            ? `服务暂时不可用（HTTP ${response.status}）`
-            : `健康快照上传失败（HTTP ${response.status}）`;
-        throw new Error(localizeErrorMessage(data?.message ?? '', fallbackMessage));
-      }
-      return { uploadedAt: data.uploadedAt, alerts: data.alerts ?? [] };
-    },
-    [token]
-  );
 
   const fetchSleepAdvice = useCallback(
     async (snapshot: HealthSnapshot): Promise<void> => {
@@ -1213,117 +1580,40 @@ function LoginScreen(): React.JSX.Element {
     [token]
   );
 
-  const buildRiskAlertFingerprint = useCallback((alerts: HealthRiskAlert[]): string => {
-    return alerts
-      .map(item => `${item.code}:${item.severity}`)
-      .sort()
-      .join('|');
-  }, []);
-
-  const buildRiskConversationPrompt = useCallback((alerts: HealthRiskAlert[]): string => {
-    const lines = alerts.map(
-      (item, index) =>
-        `${index + 1}. ${item.title}：${item.message}${item.recommendation ? `（建议：${item.recommendation}）` : ''}`
-    );
-    return [
-      '我刚收到系统健康风险提醒，请按轻重缓急解释风险，并给我今天和未来7天可执行建议：',
-      ...lines,
-    ].join('\n');
-  }, []);
-
-  const openRiskConversation = useCallback(
-    (alerts: HealthRiskAlert[]) => {
-      setProfilePanelVisible(false);
-      setTestMode(false);
-      setActivePanel('chat');
-      const started = startNewChat({
-        showAlert: false,
-        introText:
-          '检测到健康风险提醒。已在输入框生成问题草稿，点击“发送”即可让我先解释风险，再给出行动计划。',
-        title: '健康风险跟进',
-      });
-      setChatInput(buildRiskConversationPrompt(alerts));
-      setChatDrawerVisible(false);
-      upsertChatSession(started.sessionId, [started.initialMessage], new Date().toISOString());
-    },
-    [buildRiskConversationPrompt, startNewChat, upsertChatSession]
-  );
-
-  const handleRiskAlerts = useCallback(
-    async (alerts: HealthRiskAlert[]) => {
-      if (alerts.length === 0) {
-        setLastRiskAlertFingerprint(null);
-        return;
-      }
-
-      const allowed = await ensureRiskAlertPermission();
-      if (!allowed) {
-        return;
-      }
-
-      const fingerprint = buildRiskAlertFingerprint(alerts);
-      if (lastRiskAlertFingerprint === fingerprint) {
-        return;
-      }
-
-      setLastRiskAlertFingerprint(fingerprint);
-      const body = alerts
-        .map(
-          (item, index) =>
-            `${index + 1}. ${item.title}\n${item.message}${item.recommendation ? `\n建议：${item.recommendation}` : ''}`
-        )
-        .join('\n\n');
-
-      Alert.alert('健康风险提醒', body, [
-        { text: '稍后处理', style: 'cancel' },
-        {
-          text: '立即进入新对话',
-          onPress: () => {
-            openRiskConversation(alerts);
-          },
-        },
-      ]);
-    },
-    [
-      buildRiskAlertFingerprint,
-      ensureRiskAlertPermission,
-      lastRiskAlertFingerprint,
-      openRiskConversation,
-    ]
-  );
-
   const syncHealthSnapshot = useCallback(
     async ({
       forceMock = false,
       silent = false,
-      reason = 'manual',
+      syncReason = 'manual',
+      fallbackToAlertingMock = false,
     }: {
       forceMock?: boolean;
       silent?: boolean;
-      reason?: 'manual' | 'auto' | 'chat';
-    }): Promise<HealthSnapshot | null> => {
+      syncReason?: 'manual' | 'auto' | 'chat';
+      fallbackToAlertingMock?: boolean;
+    }): Promise<{ snapshot: HealthSnapshot | null; alerts: HealthRiskSignal[] }> => {
       if (!token) {
-        return null;
+        return { snapshot: null, alerts: [] };
       }
 
       if (healthSyncInFlightRef.current) {
-        return null;
+        return { snapshot: latestSnapshotRef.current, alerts: [] };
       }
       healthSyncInFlightRef.current = true;
 
       if (!silent) {
         setHealthLoading(true);
       }
-      if (reason === 'auto') {
-        setAutoHealthSyncing(true);
-      }
       setHealthError('');
 
       try {
-        const snapshot = await loadHealthSnapshot(forceMock);
+        let snapshot = forceMock ? await loadAlertingMockHealthSnapshot() : await loadHealthSnapshot(false);
+        if (!forceMock && fallbackToAlertingMock && isSnapshotSparse(snapshot)) {
+          snapshot = await loadAlertingMockHealthSnapshot();
+        }
         if (LOG_HEALTH_SNAPSHOT_JSON) {
           try {
-            console.log(`[health][${reason}] snapshot_json=${JSON.stringify(snapshot)}`);
+            console.log(`[health] snapshot_json=${JSON.stringify(snapshot)}`);
           } catch (stringifyError) {
             console.log('[health] snapshot stringify failed', stringifyError);
           }
@@ -1337,70 +1627,118 @@ function LoginScreen(): React.JSX.Element {
           latestSnapshotRef.current = snapshot;
           lastSnapshotStateKeyRef.current = nextSnapshotStateKey;
           setVisualReady(true);
-          setHealthAuthorized(Boolean(snapshot.authorized));
-          setLastHealthSource(snapshot.source);
-          setLastHealthSyncAt(new Date().toISOString());
         }
 
-        if (!snapshotChanged) {
-          return latestSnapshotRef.current ?? snapshot;
-        }
+        fetchSleepAdvice(snapshot).catch(() => {});
 
-        if (MUTE_HEALTH_SNAPSHOT_POST) {
-          setLastHealthUploadAt(null);
-        } else {
-          try {
-            const uploaded = await uploadHealthSnapshotToBackend(snapshot, reason);
-            setLastHealthUploadAt(uploaded.uploadedAt);
-            await handleRiskAlerts(uploaded.alerts ?? []);
-          } catch (uploadError) {
-            const uploadMessage = uploadError instanceof Error ? uploadError.message : '';
-            setHealthError(localizeErrorMessage(uploadMessage, '健康数据读取成功，但上传失败'));
+        const { alerts } = await uploadHealthSnapshotToServer(snapshot, syncReason);
+        try {
+          const profile = await fetchHealthProfile();
+          if (profile) {
+            setHealthProfile(profile);
           }
+        } catch {
+          // Keep chat flow usable even if profile refresh fails.
         }
-
-        void fetchSleepAdvice(snapshot);
-
-        return snapshot;
+        return {
+          snapshot: snapshotChanged ? snapshot : latestSnapshotRef.current ?? snapshot,
+          alerts,
+        };
       } catch (error) {
         const rawMessage = error instanceof Error ? error.message : '';
         setHealthError(localizeErrorMessage(rawMessage, '读取健康数据失败'));
-        return null;
+        return { snapshot: null, alerts: [] };
       } finally {
         healthSyncInFlightRef.current = false;
         if (!silent) {
           setHealthLoading(false);
         }
-        if (reason === 'auto') {
-          setAutoHealthSyncing(false);
-        }
       }
     },
-    [token, uploadHealthSnapshotToBackend, handleRiskAlerts, fetchSleepAdvice]
+    [token, fetchSleepAdvice, uploadHealthSnapshotToServer, fetchHealthProfile]
   );
 
-  const ensureFreshHealthSnapshotForChat = useCallback(async (): Promise<HealthSnapshot | null> => {
+  const ensureHealthSnapshotForChatSession = useCallback(
+    async (sessionId: number): Promise<HealthSnapshot | null> => {
+      if (!token || sessionId <= 0) {
+        return null;
+      }
+
+      if (lastChatHealthSessionIdRef.current === sessionId && latestSnapshotRef.current) {
+        return latestSnapshotRef.current;
+      }
+
+      const result = await syncHealthSnapshot({
+        silent: true,
+        syncReason: 'chat',
+        fallbackToAlertingMock: true,
+      });
+      if (result.snapshot) {
+        lastChatHealthSessionIdRef.current = sessionId;
+      }
+      return result.snapshot;
+    },
+    [token, syncHealthSnapshot]
+  );
+
+  useEffect(() => {
     if (!token) {
-      return null;
+      lastBootstrapTokenRef.current = null;
+      setHealthProfile(null);
+      return;
     }
 
-    const current = healthSnapshot;
-    if (!current?.generatedAt) {
-      return syncHealthSnapshot({ silent: true, reason: 'chat' });
+    if (lastBootstrapTokenRef.current === token) {
+      return;
     }
+    lastBootstrapTokenRef.current = token;
 
-    const generatedAtMs = new Date(current.generatedAt).getTime();
-    if (!Number.isFinite(generatedAtMs)) {
-      return syncHealthSnapshot({ silent: true, reason: 'chat' });
-    }
+    let cancelled = false;
+    const bootstrap = async () => {
+      setLoading(true);
+      try {
+        const sessions = await fetchStoredChatSessions();
+        if (cancelled) {
+          return;
+        }
+        setChatSessions(sessions);
 
-    const ageMs = Date.now() - generatedAtMs;
-    if (ageMs >= HEALTH_SYNC_INTERVAL_MS) {
-      return syncHealthSnapshot({ silent: true, reason: 'chat' });
-    }
+        const healthSyncResult = await syncHealthSnapshot({
+          silent: true,
+          syncReason: 'auto',
+          fallbackToAlertingMock: true,
+        });
+        if (cancelled) {
+          return;
+        }
 
-    return current;
-  }, [token, healthSnapshot, syncHealthSnapshot]);
+        const profile = await fetchHealthProfile();
+        if (cancelled) {
+          return;
+        }
+        setHealthProfile(profile);
+
+        if (healthSyncResult.snapshot && healthSyncResult.alerts.length > 0) {
+          await startProactiveLoginReview(healthSyncResult.snapshot, healthSyncResult.alerts, sessions);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const rawMessage = error instanceof Error ? error.message : '';
+          setHealthError(localizeErrorMessage(rawMessage, '初始化用户数据失败'));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    bootstrap().catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, fetchStoredChatSessions, syncHealthSnapshot, fetchHealthProfile, startProactiveLoginReview]);
 
   const onLoadHealthData = async (useMock = false) => {
     if (!canUseHealth) {
@@ -1408,82 +1746,36 @@ function LoginScreen(): React.JSX.Element {
       return;
     }
 
-    setAutoHealthSyncEnabled(!MUTE_AUTO_HEALTH_SYNC);
-    void ensureRiskAlertPermission();
     await syncHealthSnapshot({
       forceMock: useMock,
       silent: false,
-      reason: 'manual',
+      syncReason: useMock ? 'manual' : 'manual',
+      fallbackToAlertingMock: useMock,
     });
   };
 
-  useEffect(() => {
-    if (!token || !autoHealthSyncEnabled || MUTE_AUTO_HEALTH_SYNC) {
-      clearHealthSyncTimer();
-      setAutoHealthSyncing(false);
-      return;
-    }
-
-    let cancelled = false;
-
-    const scheduleNext = (baseDelayMs: number) => {
-      if (cancelled) {
-        return;
-      }
-      const jitterMs = Math.floor(Math.random() * AUTO_HEALTH_SYNC_JITTER_MS);
-      clearHealthSyncTimer();
-      healthSyncTimerRef.current = setTimeout(() => {
-        void runAutoSync();
-      }, Math.max(3000, baseDelayMs + jitterMs));
-    };
-
-    const runAutoSync = async () => {
-      if (cancelled) {
-        return;
-      }
-      await syncHealthSnapshot({ forceMock: false, silent: true, reason: 'auto' });
-      scheduleNext(HEALTH_SYNC_INTERVAL_MS);
-    };
-
-    scheduleNext(AUTO_HEALTH_SYNC_INITIAL_DELAY_MS);
-
-    return () => {
-      cancelled = true;
-      clearHealthSyncTimer();
-      setAutoHealthSyncing(false);
-    };
-  }, [token, autoHealthSyncEnabled, syncHealthSnapshot, clearHealthSyncTimer]);
-
-  useEffect(() => {
-    if (!token || !autoHealthSyncEnabled || MUTE_AUTO_HEALTH_SYNC) {
-      return;
-    }
-
-    const subscription = AppState.addEventListener('change', nextState => {
-      const prevState = appStateRef.current;
-      appStateRef.current = nextState;
-      if ((prevState === 'background' || prevState === 'inactive') && nextState === 'active') {
-        syncHealthSnapshot({ forceMock: false, silent: true, reason: 'auto' }).catch(() => {});
-      }
-    });
-
-    return () => {
-      subscription.remove();
-    };
-  }, [token, autoHealthSyncEnabled, syncHealthSnapshot]);
-
-  const onOpenChat = () => {
+  const onOpenFreshChat = () => {
     if (!token) {
       Alert.alert('提示', '请先登录');
       return;
     }
+
     setTestMode(false);
     setActivePanel('chat');
-    if (chatSessionId <= 0 || chatMessages.length === 0) {
-      startNewChat({ showAlert: false });
-    }
-    setChatDrawerVisible(false);
     setProfilePanelVisible(false);
+    startNewChat({ showAlert: false });
+  };
+
+  const onOpenHistory = () => {
+    if (!token) {
+      Alert.alert('提示', '请先登录');
+      return;
+    }
+
+    setTestMode(false);
+    setActivePanel('chat');
+    setProfilePanelVisible(false);
+    setChatDrawerVisible(true);
   };
 
   const onOpenChatSession = (sessionId: number) => {
@@ -1517,6 +1809,7 @@ function LoginScreen(): React.JSX.Element {
       id: createMessageId(),
       role: 'user',
       content: question,
+      createdAt: new Date().toISOString(),
     };
     const previousTurns = chatMessages
       .filter(item => item.role === 'user' || item.role === 'assistant')
@@ -1528,7 +1821,7 @@ function LoginScreen(): React.JSX.Element {
     setChatMessages(prev => [...prev, userMessage]);
     setChatLoading(true);
     try {
-      const latestSnapshotForChat = await ensureFreshHealthSnapshotForChat();
+      const latestSnapshotForChat = await ensureHealthSnapshotForChatSession(chatSessionId);
 
       const response = await fetch(`${normalizedBase}/api/agent/chat/health`, {
         method: 'POST',
@@ -1566,47 +1859,55 @@ function LoginScreen(): React.JSX.Element {
           sectionTitle: item.sectionTitle,
         }));
       const plainAnswer = toPlainChatText(data.answer as string);
+      const assistantMessage: ChatMessage = {
+        id: createMessageId(),
+        role: 'assistant',
+        content: plainAnswer,
+        citations,
+        createdAt: new Date().toISOString(),
+      };
 
-      setChatMessages(prev => [
-        ...prev,
-        {
-          id: createMessageId(),
-          role: 'assistant',
-          content: plainAnswer,
-          citations,
-        },
-      ]);
+      const nextMessages = [...chatMessages, userMessage, assistantMessage];
+      setChatMessages(nextMessages);
+      const existingSession = chatSessions.find(item => item.id === chatSessionId);
+      persistChatSessionToServer(chatSessionId, nextMessages, existingSession ?? undefined).catch(() => {});
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : '';
       const message = localizeErrorMessage(rawMessage, '网络错误，请稍后重试');
-      setChatMessages(prev => [
-        ...prev,
-        {
-          id: createMessageId(),
-          role: 'assistant',
-          content: `本次请求失败：${message}`,
-        },
-      ]);
+      const assistantMessage: ChatMessage = {
+        id: createMessageId(),
+        role: 'assistant',
+        content: `本次请求失败：${message}`,
+        createdAt: new Date().toISOString(),
+      };
+      const nextMessages = [...chatMessages, userMessage, assistantMessage];
+      setChatMessages(nextMessages);
+      const existingSession = chatSessions.find(item => item.id === chatSessionId);
+      persistChatSessionToServer(chatSessionId, nextMessages, existingSession ?? undefined).catch(() => {});
     } finally {
       setChatLoading(false);
     }
   };
 
   const onLogout = () => {
-    clearHealthSyncTimer();
     healthSyncInFlightRef.current = false;
-    lastUploadDedupKeyRef.current = null;
-    lastUploadAttemptAtRef.current = 0;
     lastSnapshotStateKeyRef.current = null;
     latestSnapshotRef.current = null;
     lastSleepStateKeyRef.current = null;
     sleepAdviceInFlightRef.current = false;
+    lastChatHealthSessionIdRef.current = null;
     const rememberedLogin = readRememberedLogin();
     setToken('');
     setCurrentUser(null);
     setLoginId(rememberedLogin.enabled ? rememberedLogin.loginId : '');
     setUsername('');
     setEmail('');
+    setAge('');
+    setGender('');
+    setHeightCm('');
+    setWeightKg('');
+    setExperimentConsent(false);
+    setConsentModalVisible(false);
     setName('');
     setPassword(rememberedLogin.enabled ? rememberedLogin.password : '');
     setRememberCredentials(rememberedLogin.enabled);
@@ -1616,12 +1917,7 @@ function LoginScreen(): React.JSX.Element {
     setUsernameHint('');
     setHealthSnapshot(null);
     setHealthError('');
-    setHealthAuthorized(null);
-    setAutoHealthSyncEnabled(false);
-    setAutoHealthSyncing(false);
-    setLastHealthSyncAt(null);
-    setLastHealthUploadAt(null);
-    setLastHealthSource(null);
+    setHealthProfile(null);
     setSleepAdvice('');
     setSleepAdviceLoading(false);
     setSleepAdviceUpdatedAt(null);
@@ -1634,11 +1930,10 @@ function LoginScreen(): React.JSX.Element {
     setChatSessionId(0);
     setChatSessions([]);
     setChatDrawerVisible(false);
-    setRiskAlertPermission(null);
-    setLastRiskAlertFingerprint(null);
     setProfilePanelVisible(false);
     setEditorVisible(false);
     setMode('login');
+    lastBootstrapTokenRef.current = null;
   };
 
   const onToggleRememberCredentials = useCallback(() => {
@@ -1693,20 +1988,6 @@ function LoginScreen(): React.JSX.Element {
 
       {token ? (
         <>
-          <Pressable
-            style={styles.avatarButton}
-            onPress={() => setProfilePanelVisible(prev => !prev)}
-          >
-            <View
-              style={[
-                styles.avatarCircle,
-                { backgroundColor: avatar.bg, borderColor: avatar.border },
-              ]}
-            >
-              <Text style={styles.avatarText}>{avatar.glyph}</Text>
-            </View>
-          </Pressable>
-
           {profilePanelVisible ? (
             <>
               <Pressable
@@ -1717,6 +1998,12 @@ function LoginScreen(): React.JSX.Element {
                 <Text style={styles.profilePanelTitle}>用户中心</Text>
                 <Text style={styles.profilePanelMeta}>用户名：{currentUser?.username ?? '--'}</Text>
                 <Text style={styles.profilePanelMeta}>{currentUser?.email ?? '--'}</Text>
+                <Text style={styles.profilePanelMeta}>
+                  {currentUser?.age ? `${currentUser.age} 岁` : '--'} · {getGenderLabel(currentUser?.gender)}
+                </Text>
+                <Text style={styles.profilePanelMeta}>
+                  身高 {currentUser?.heightCm ?? '--'} cm · 体重 {currentUser?.weightKg ?? '--'} kg
+                </Text>
                 <Pressable style={styles.profileItemButton} onPress={openNicknameEditor}>
                   <Text style={styles.profileItemText}>更改昵称</Text>
                 </Pressable>
@@ -1743,32 +2030,55 @@ function LoginScreen(): React.JSX.Element {
           <View style={styles.chatFullscreen}>
             <View style={styles.chatSurface}>
               <View style={styles.chatPanel}>
-                <View style={styles.chatHeaderRow}>
+                <View style={styles.chatHeaderTopRow}>
                   <Pressable
-                    style={styles.chatHeaderButton}
+                    style={styles.chatBackButton}
+                    onPress={() => {
+                      setActivePanel('home');
+                      setTestMode(false);
+                      setChatDrawerVisible(false);
+                    }}
+                  >
+                    <Text style={styles.chatBackButtonText}>首页</Text>
+                  </Pressable>
+                  <View style={styles.chatHeaderTitleBlock}>
+                    <Text numberOfLines={1} style={styles.chatHeaderTitle}>
+                      中医智能对话
+                    </Text>
+                    <Text numberOfLines={1} style={styles.chatHeaderSubtitle}>
+                      {currentSessionType === 'login_health_review' ? '主动健康提醒' : '当前对话'}
+                      {' · '}
+                      {currentSessionTitle}
+                    </Text>
+                  </View>
+                  <Pressable
+                    style={styles.chatProfileButton}
+                    onPress={() => setProfilePanelVisible(prev => !prev)}
+                  >
+                    <View
+                      style={[
+                        styles.chatProfileCircle,
+                        { backgroundColor: avatar.bg, borderColor: avatar.border },
+                      ]}
+                    >
+                      <Text style={styles.avatarText}>{avatar.glyph}</Text>
+                    </View>
+                  </Pressable>
+                </View>
+
+                <View style={styles.chatToolbarRow}>
+                  <Pressable
+                    style={styles.chatToolbarSecondaryButton}
                     onPress={() => setChatDrawerVisible(prev => !prev)}
                   >
-                    <Text style={styles.chatHeaderButtonText}>会话历史</Text>
+                    <Text style={styles.chatToolbarSecondaryText}>历史</Text>
                   </Pressable>
-                  <Text style={styles.chatHeaderTitle}>中医智能对话</Text>
-                  <View style={styles.chatHeaderActionGroup}>
-                    <Pressable
-                      style={styles.chatHeaderButtonCompact}
-                      onPress={() => {
-                        setActivePanel('home');
-                        setTestMode(false);
-                        setChatDrawerVisible(false);
-                      }}
-                    >
-                      <Text style={styles.chatHeaderButtonText}>首页</Text>
-                    </Pressable>
-                    <Pressable
-                      style={styles.chatHeaderButtonCompact}
-                      onPress={() => startNewChat({ showAlert: true })}
-                    >
-                      <Text style={styles.chatHeaderButtonText}>新聊天</Text>
-                    </Pressable>
-                  </View>
+                  <Pressable
+                    style={styles.chatToolbarPrimaryButton}
+                    onPress={() => startNewChat({ showAlert: true })}
+                  >
+                    <Text style={styles.chatToolbarPrimaryText}>新对话</Text>
+                  </Pressable>
                 </View>
 
                 {chatDrawerVisible ? (
@@ -1812,8 +2122,15 @@ function LoginScreen(): React.JSX.Element {
                               >
                                 {session.title}
                               </Text>
+                              {session.summary ? (
+                                <Text numberOfLines={2} style={styles.chatDrawerItemSummary}>
+                                  {session.summary}
+                                </Text>
+                              ) : null}
                               <Text style={styles.chatDrawerItemMeta}>
-                                {formatDateLabel(session.updatedAt)} · {session.messages.length} 条消息
+                                {session.sessionType === 'login_health_review' ? '健康提醒' : '对话'}
+                                {' · '}
+                                {formatDateLabel(session.updatedAt)}
                               </Text>
                             </Pressable>
                           ))
@@ -1821,19 +2138,6 @@ function LoginScreen(): React.JSX.Element {
                       </ScrollView>
                     </View>
                   </>
-                ) : null}
-
-                <View style={styles.chatSessionRow}>
-                  <Text style={styles.chatSessionTag}>会话 #{chatSessionId}（独立上下文）</Text>
-                  <Text style={styles.chatSessionTitle}>{currentSessionTitle}</Text>
-                </View>
-                <Text style={styles.chatPromptHint}>
-                  左侧会话历史支持快速回看和切换旧对话。
-                </Text>
-                {riskAlertPermission !== null ? (
-                  <Text style={styles.chatRiskPermissionStatus}>
-                    风险弹窗权限：{riskAlertPermission ? '已允许' : '未允许'}
-                  </Text>
                 ) : null}
 
                 <ScrollView
@@ -1872,16 +2176,6 @@ function LoginScreen(): React.JSX.Element {
                       >
                         {item.content}
                       </Text>
-                      {item.role === 'assistant' && item.citations && item.citations.length > 0 ? (
-                        <View style={styles.chatCitationBox}>
-                          {item.citations.slice(0, 3).map((citation, idx) => (
-                            <Text key={`${item.id}-c-${idx}`} style={styles.chatCitationText}>
-                              {citation.label} · {citation.sourceTitle}
-                              {citation.sectionTitle ? ` · ${citation.sectionTitle}` : ''}
-                            </Text>
-                          ))}
-                        </View>
-                      ) : null}
                     </View>
                   ))}
                 </ScrollView>
@@ -1921,13 +2215,43 @@ function LoginScreen(): React.JSX.Element {
             </View>
           </View>
         ) : (
-          <View style={[styles.content, styles.contentSpacing]}>
-            <View style={styles.titleBlock}>
-              <SealLogo size={44} style={styles.titleSeal} />
-              <Text style={styles.cnTitle}>岐元灵术</Text>
-              <Text style={styles.enTitle}>QiAlchemy</Text>
-              <Text style={styles.subtitle}>中医养生与AI融合实验</Text>
-            </View>
+          <ScrollView
+            style={styles.flex}
+            contentContainerStyle={styles.contentScrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {token ? (
+              <View style={styles.compactTitleRow}>
+                <View style={styles.compactTitleBrand}>
+                  <SealLogo size={34} style={styles.compactTitleSeal} />
+                  <View style={styles.compactTitleTextWrap}>
+                    <Text style={styles.compactCnTitle}>岐元灵术</Text>
+                    <Text style={styles.compactSubtitle}>中医养生与 AI 融合实验</Text>
+                  </View>
+                </View>
+                <Pressable
+                  style={styles.compactAvatarButton}
+                  onPress={() => setProfilePanelVisible(prev => !prev)}
+                >
+                  <View
+                    style={[
+                      styles.compactAvatarCircle,
+                      { backgroundColor: avatar.bg, borderColor: avatar.border },
+                    ]}
+                  >
+                    <Text style={styles.avatarText}>{avatar.glyph}</Text>
+                  </View>
+                </Pressable>
+              </View>
+            ) : (
+              <View style={styles.titleBlock}>
+                <SealLogo size={44} style={styles.titleSeal} />
+                <Text style={styles.cnTitle}>岐元灵术</Text>
+                <Text style={styles.enTitle}>QiAlchemy</Text>
+                <Text style={styles.subtitle}>中医养生与AI融合实验</Text>
+              </View>
+            )}
 
             {!token ? (
               <View style={styles.card}>
@@ -1937,6 +2261,7 @@ function LoginScreen(): React.JSX.Element {
                     onPress={() => {
                       setMode('login');
                       setConfirmPassword('');
+                      setConsentModalVisible(false);
                       setUsernameChecking(false);
                       setUsernameAvailable(null);
                       setUsernameHint('');
@@ -1949,6 +2274,7 @@ function LoginScreen(): React.JSX.Element {
                     onPress={() => {
                       setMode('register');
                       setLoginId('');
+                      setConsentModalVisible(false);
                     }}
                   >
                     <Text style={[styles.tabText, mode === 'register' && styles.tabTextActive]}>注册</Text>
@@ -2017,6 +2343,64 @@ function LoginScreen(): React.JSX.Element {
                       value={email}
                       onChangeText={setEmail}
                     />
+
+                    <Text style={styles.label}>年龄</Text>
+                    <TextInput
+                      keyboardType="number-pad"
+                      placeholder="请输入年龄"
+                      placeholderTextColor="#99866b"
+                      style={styles.input}
+                      value={age}
+                      onChangeText={setAge}
+                    />
+
+                    <Text style={styles.label}>性别</Text>
+                    <View style={styles.genderOptionRow}>
+                      {GENDER_OPTIONS.map(option => (
+                        <Pressable
+                          key={option.value}
+                          style={[
+                            styles.genderOptionChip,
+                            gender === option.value && styles.genderOptionChipActive,
+                          ]}
+                          onPress={() => setGender(option.value)}
+                        >
+                          <Text
+                            style={[
+                              styles.genderOptionText,
+                              gender === option.value && styles.genderOptionTextActive,
+                            ]}
+                          >
+                            {option.label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+
+                    <View style={styles.inlineInputRow}>
+                      <View style={styles.inlineInputGroup}>
+                        <Text style={styles.label}>身高（cm）</Text>
+                        <TextInput
+                          keyboardType="decimal-pad"
+                          placeholder="170"
+                          placeholderTextColor="#99866b"
+                          style={styles.input}
+                          value={heightCm}
+                          onChangeText={setHeightCm}
+                        />
+                      </View>
+                      <View style={styles.inlineInputGroup}>
+                        <Text style={styles.label}>体重（kg）</Text>
+                        <TextInput
+                          keyboardType="decimal-pad"
+                          placeholder="60"
+                          placeholderTextColor="#99866b"
+                          style={styles.input}
+                          value={weightKg}
+                          onChangeText={setWeightKg}
+                        />
+                      </View>
+                    </View>
                   </>
                 )}
 
@@ -2067,6 +2451,21 @@ function LoginScreen(): React.JSX.Element {
                       value={confirmPassword}
                       onChangeText={setConfirmPassword}
                     />
+
+                    <Pressable
+                      style={styles.rememberRow}
+                      onPress={() => setExperimentConsent(prev => !prev)}
+                    >
+                      <View
+                        style={[
+                          styles.rememberCheckbox,
+                          experimentConsent && styles.rememberCheckboxChecked,
+                        ]}
+                      >
+                        {experimentConsent ? <Text style={styles.rememberCheckmark}>✓</Text> : null}
+                      </View>
+                      <Text style={styles.rememberText}>我愿意参与实验并授权匿名分析</Text>
+                    </Pressable>
                   </>
                 ) : null}
 
@@ -2087,21 +2486,76 @@ function LoginScreen(): React.JSX.Element {
             ) : null}
 
             {token && !testMode ? (
-              <View style={styles.card}>
-                <Text style={styles.testHomeTitle}>欢迎回来，{currentUser?.name || '同学'}</Text>
-                <Text style={styles.testHomeDesc}>请选择功能入口：开始聊天或进入测试模式。</Text>
-                <View style={styles.testEntryRow}>
-                  <Pressable style={[styles.button, styles.testEntryButton]} onPress={onOpenChat}>
-                    <Text style={styles.buttonText}>开始聊天</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.secondaryButton, styles.testEntryButton]}
-                    onPress={() => setTestMode(true)}
-                  >
-                    <Text style={styles.secondaryButtonText}>测试模式</Text>
+              <>
+                <View style={[styles.card, styles.homeEntryCard]}>
+                  <Text style={styles.testHomeTitle}>欢迎回来，{currentUser?.name || '同学'}</Text>
+                  <Text style={styles.testHomeDesc}>新对话放在主入口，历史放在并列次入口，避免先进入聊天页再找会话。</Text>
+                  <View style={styles.homePrimaryActionRow}>
+                    <Pressable
+                      style={[styles.button, styles.homePrimaryActionButton]}
+                      onPress={onOpenFreshChat}
+                    >
+                      <Text style={styles.buttonText}>新对话</Text>
+                      <Text style={styles.homePrimaryActionMeta}>开始一次新的中医分析</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.secondaryButton, styles.testEntryButton]}
+                      onPress={onOpenHistory}
+                    >
+                      <Text style={styles.secondaryButtonText}>历史</Text>
+                      <Text style={styles.homeSecondaryActionMeta}>继续之前的分析会话</Text>
+                    </Pressable>
+                  </View>
+                  <Pressable style={styles.homeTertiaryAction} onPress={() => setTestMode(true)}>
+                    <Text style={styles.homeTertiaryActionText}>进入测试模式</Text>
                   </Pressable>
                 </View>
-              </View>
+
+                {healthProfile ? (
+                  <View style={styles.card}>
+                    <Text style={styles.healthProfileTitle}>个人健康记录</Text>
+                    <Text style={styles.healthProfileMeta}>
+                      {healthProfile.lastSnapshotGeneratedAt
+                        ? `最近更新：${formatDateLabel(healthProfile.lastSnapshotGeneratedAt)}`
+                        : '最近尚未同步健康快照'}
+                    </Text>
+                    {healthProfile.llmHealthOverview ? (
+                      <Text style={styles.healthProfileOverview}>{healthProfile.llmHealthOverview}</Text>
+                    ) : null}
+                    {healthProfile.latestSignals.length > 0 ? (
+                      <>
+                        <Text style={styles.healthProfileSectionTitle}>本次登录识别到的异常</Text>
+                        {healthProfile.latestSignals.slice(0, 5).map(signal => (
+                          <View key={`latest-${signal.code}`} style={styles.healthProfileItem}>
+                            <Text style={styles.healthProfileItemTitle}>
+                              {signal.severity === 'high' ? '高' : '中'} · {signal.title}
+                            </Text>
+                            <Text style={styles.healthProfileItemText}>{signal.latestMessage}</Text>
+                          </View>
+                        ))}
+                      </>
+                    ) : (
+                      <Text style={styles.healthProfileEmpty}>本次登录未识别到明显异常信号。</Text>
+                    )}
+
+                    {healthProfile.trackedSignals.length > 0 ? (
+                      <>
+                        <Text style={styles.healthProfileSectionTitle}>历史累计记录</Text>
+                        {healthProfile.trackedSignals.slice(0, 4).map(signal => (
+                          <View key={`tracked-${signal.code}`} style={styles.healthProfileItem}>
+                            <Text style={styles.healthProfileItemTitle}>
+                              {signal.title} · 共 {signal.occurrenceCount} 次
+                            </Text>
+                            <Text style={styles.healthProfileItemText}>
+                              最近：{formatDateLabel(signal.lastDetectedAt)}
+                            </Text>
+                          </View>
+                        ))}
+                      </>
+                    ) : null}
+                  </View>
+                ) : null}
+              </>
             ) : null}
 
             {token && testMode ? (
@@ -2175,9 +2629,43 @@ function LoginScreen(): React.JSX.Element {
                 )}
               </View>
             ) : null}
-          </View>
+          </ScrollView>
         )}
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={consentModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {}}
+      >
+        <View style={styles.editorModalMask}>
+          <View style={styles.editorModalCard}>
+            <Text style={styles.editorTitle}>参与实验确认</Text>
+            <Text style={styles.consentModalText}>
+              新账户继续注册前，必须勾选同意参与实验。我们会结合你的基础资料与健康数据做账号级建模，并默认只用于当前实验。
+            </Text>
+            <Pressable style={styles.rememberRow} onPress={() => setExperimentConsent(prev => !prev)}>
+              <View
+                style={[
+                  styles.rememberCheckbox,
+                  experimentConsent && styles.rememberCheckboxChecked,
+                ]}
+              >
+                {experimentConsent ? <Text style={styles.rememberCheckmark}>✓</Text> : null}
+              </View>
+              <Text style={styles.rememberText}>我已了解并同意参与实验</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.editorConfirmButton, !experimentConsent && styles.buttonDisabled]}
+              disabled={!experimentConsent}
+              onPress={() => setConsentModalVisible(false)}
+            >
+              <Text style={styles.editorConfirmText}>继续注册</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={editorVisible}
@@ -2247,8 +2735,59 @@ const styles = StyleSheet.create({
     paddingTop: 30,
     paddingBottom: 24,
   },
+  contentScrollContent: {
+    paddingHorizontal: 24,
+    paddingTop: 30,
+    paddingBottom: 40,
+  },
   titleBlock: {
     paddingTop: 8,
+  },
+  compactTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 4,
+  },
+  compactTitleBrand: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  compactTitleSeal: {
+    marginBottom: 0,
+  },
+  compactTitleTextWrap: {
+    flex: 1,
+  },
+  compactAvatarButton: {
+    marginLeft: 12,
+  },
+  compactAvatarCircle: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000000',
+    shadowOpacity: 0.18,
+    shadowOffset: { width: 0, height: 3 },
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  compactCnTitle: {
+    color: '#2f2115',
+    fontSize: 24,
+    letterSpacing: 1,
+    fontFamily: Platform.OS === 'ios' ? 'STKaiti' : 'serif',
+  },
+  compactSubtitle: {
+    marginTop: 2,
+    color: '#7c664d',
+    fontSize: 12,
+    lineHeight: 18,
   },
   titleSeal: {
     marginBottom: 14,
@@ -2389,6 +2928,39 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     backgroundColor: '#fffdf8',
   },
+  inlineInputRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  inlineInputGroup: {
+    flex: 1,
+  },
+  genderOptionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
+  },
+  genderOptionChip: {
+    borderWidth: 1,
+    borderColor: '#d8c4a7',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#fffdf8',
+  },
+  genderOptionChipActive: {
+    borderColor: '#a7342d',
+    backgroundColor: '#fff2eb',
+  },
+  genderOptionText: {
+    color: '#75583a',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  genderOptionTextActive: {
+    color: '#a7342d',
+  },
   rememberRow: {
     marginTop: -8,
     marginBottom: 14,
@@ -2495,53 +3067,98 @@ const styles = StyleSheet.create({
     minHeight: 0,
     position: 'relative',
   },
-  chatHeaderRow: {
+  chatHeaderTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 10,
+    marginBottom: 12,
     gap: 8,
   },
-  chatHeaderTitle: {
+  chatHeaderTitleBlock: {
     flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: 6,
+  },
+  chatHeaderTitle: {
     textAlign: 'center',
     color: '#553b24',
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'STKaiti' : 'serif',
   },
-  chatHeaderButton: {
-    minWidth: 86,
+  chatHeaderSubtitle: {
+    marginTop: 4,
+    color: '#8c7358',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  chatBackButton: {
+    width: 68,
     borderWidth: 1,
     borderColor: '#cdb28d',
-    borderRadius: 10,
-    paddingVertical: 7,
-    paddingHorizontal: 8,
+    borderRadius: 999,
+    paddingVertical: 8,
     backgroundColor: '#f8efe0',
     alignItems: 'center',
   },
-  chatHeaderActionGroup: {
-    flexDirection: 'row',
-    gap: 6,
-  },
-  chatHeaderButtonCompact: {
-    minWidth: 58,
-    borderWidth: 1,
-    borderColor: '#cdb28d',
-    borderRadius: 10,
-    paddingVertical: 7,
-    paddingHorizontal: 8,
-    backgroundColor: '#f8efe0',
-    alignItems: 'center',
-  },
-  chatHeaderButtonText: {
+  chatBackButtonText: {
     color: '#6f5339',
     fontSize: 12,
     fontWeight: '700',
   },
+  chatProfileButton: {
+    width: 68,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatProfileCircle: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000000',
+    shadowOpacity: 0.18,
+    shadowOffset: { width: 0, height: 3 },
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  chatToolbarRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 14,
+  },
+  chatToolbarPrimaryButton: {
+    flex: 1,
+    borderRadius: 12,
+    backgroundColor: '#b13c2f',
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatToolbarPrimaryText: {
+    color: '#fff5ef',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  chatToolbarSecondaryButton: {
+    width: 92,
+    borderWidth: 1,
+    borderColor: '#d4bb97',
+    borderRadius: 12,
+    backgroundColor: '#fbf4e8',
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatToolbarSecondaryText: {
+    color: '#6f5339',
+    fontSize: 14,
+    fontWeight: '700',
+  },
   chatDrawerBackdrop: {
     position: 'absolute',
-    top: 46,
+    top: 98,
     left: 0,
     right: 0,
     bottom: 0,
@@ -2551,10 +3168,10 @@ const styles = StyleSheet.create({
   },
   chatDrawerPanel: {
     position: 'absolute',
-    top: 46,
+    top: 98,
     left: 0,
     bottom: 64,
-    width: '72%',
+    width: '78%',
     borderWidth: 1,
     borderColor: '#d7bf9c',
     backgroundColor: '#fff8ee',
@@ -2596,7 +3213,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   chatDrawerScrollContent: {
-    gap: 8,
+    gap: 6,
     paddingBottom: 16,
   },
   chatDrawerEmpty: {
@@ -2606,56 +3223,33 @@ const styles = StyleSheet.create({
   },
   chatDrawerItem: {
     borderWidth: 1,
-    borderColor: '#dfccb0',
-    borderRadius: 10,
-    backgroundColor: '#fffdf8',
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    borderColor: 'rgba(111, 83, 57, 0.08)',
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 253, 248, 0.88)',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
   chatDrawerItemActive: {
     borderColor: '#b13c2f',
-    backgroundColor: '#fff2eb',
+    backgroundColor: '#fff3ec',
   },
   chatDrawerItemTitle: {
     color: '#61462d',
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
   },
   chatDrawerItemTitleActive: {
     color: '#a7342d',
   },
+  chatDrawerItemSummary: {
+    marginTop: 4,
+    color: '#70563d',
+    fontSize: 12,
+    lineHeight: 18,
+  },
   chatDrawerItemMeta: {
     marginTop: 4,
     color: '#8c7358',
-    fontSize: 11,
-  },
-  chatSessionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-    gap: 8,
-  },
-  chatSessionTag: {
-    color: '#8c7258',
-    fontSize: 12,
-  },
-  chatSessionTitle: {
-    flex: 1,
-    textAlign: 'right',
-    color: '#6f5338',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  chatPromptHint: {
-    marginBottom: 8,
-    color: '#8a6f54',
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  chatRiskPermissionStatus: {
-    marginBottom: 8,
-    color: '#8a6f54',
     fontSize: 11,
   },
   chatScroll: {
@@ -2707,18 +3301,6 @@ const styles = StyleSheet.create({
   },
   chatBubbleTextAssistant: {
     color: '#2f2115',
-  },
-  chatCitationBox: {
-    marginTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(94, 62, 32, 0.18)',
-    paddingTop: 6,
-    gap: 3,
-  },
-  chatCitationText: {
-    color: '#7a6248',
-    fontSize: 11,
-    lineHeight: 16,
   },
   chatComposer: {
     marginTop: 10,
@@ -2794,24 +3376,103 @@ const styles = StyleSheet.create({
   chatLoadingSpinner: {
     marginTop: 12,
   },
-  testEntryRow: {
+  testEntryButton: {
+    flex: 1,
+  },
+  homeEntryCard: {
+    gap: 14,
+  },
+  homePrimaryActionRow: {
     flexDirection: 'row',
     gap: 10,
   },
-  testEntryButton: {
-    flex: 1,
+  homePrimaryActionButton: {
+    flex: 1.15,
+    alignItems: 'flex-start',
+    paddingTop: 14,
+    paddingBottom: 14,
+  },
+  homePrimaryActionMeta: {
+    marginTop: 6,
+    color: '#f8dfd7',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  homeSecondaryActionMeta: {
+    marginTop: 6,
+    color: '#8a6b4e',
+    fontSize: 11,
+    lineHeight: 16,
+    textAlign: 'center',
+  },
+  homeTertiaryAction: {
+    alignSelf: 'flex-start',
+    paddingVertical: 2,
+    paddingHorizontal: 2,
+  },
+  homeTertiaryActionText: {
+    color: '#8a6544',
+    fontSize: 12,
+    fontWeight: '600',
   },
   testHomeTitle: {
     color: '#5f4227',
     fontSize: 20,
     fontWeight: '700',
-    marginBottom: 8,
   },
   testHomeDesc: {
     color: '#7d6449',
     fontSize: 14,
     lineHeight: 20,
-    marginBottom: 14,
+  },
+  healthProfileTitle: {
+    color: '#5f4227',
+    fontSize: 17,
+    fontWeight: '700',
+  },
+  healthProfileMeta: {
+    marginTop: 4,
+    color: '#8a6f54',
+    fontSize: 11,
+  },
+  healthProfileOverview: {
+    marginTop: 10,
+    color: '#6d533a',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  healthProfileSectionTitle: {
+    marginTop: 12,
+    marginBottom: 6,
+    color: '#68492f',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  healthProfileItem: {
+    borderWidth: 1,
+    borderColor: '#e0cfb6',
+    borderRadius: 12,
+    backgroundColor: '#fff8ef',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 6,
+  },
+  healthProfileItemTitle: {
+    color: '#5a3f28',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  healthProfileItemText: {
+    marginTop: 4,
+    color: '#7b654d',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  healthProfileEmpty: {
+    marginTop: 10,
+    color: '#7e6549',
+    fontSize: 12,
+    lineHeight: 18,
   },
   testModeHeader: {
     flexDirection: 'row',
@@ -3005,25 +3666,6 @@ const styles = StyleSheet.create({
     marginBottom: 3,
     lineHeight: 16,
   },
-  avatarButton: {
-    position: 'absolute',
-    top: 56,
-    right: 20,
-    zIndex: 42,
-  },
-  avatarCircle: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    borderWidth: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000000',
-    shadowOpacity: 0.2,
-    shadowOffset: { width: 0, height: 3 },
-    shadowRadius: 8,
-    elevation: 5,
-  },
   avatarText: {
     color: '#fff6ee',
     fontSize: 20,
@@ -3115,6 +3757,12 @@ const styles = StyleSheet.create({
     color: '#5f4329',
     fontSize: 16,
     fontWeight: '700',
+  },
+  consentModalText: {
+    marginTop: 10,
+    color: '#71563c',
+    fontSize: 13,
+    lineHeight: 20,
   },
   editorInput: {
     marginTop: 10,

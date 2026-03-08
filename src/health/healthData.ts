@@ -757,6 +757,69 @@ function buildMockSnapshot(): HealthKitAllData {
   };
 }
 
+export function buildAlertingMockSnapshot(): HealthKitAllData {
+  const snapshot = buildMockSnapshot();
+  const now = new Date();
+
+  return {
+    ...snapshot,
+    generatedAt: now.toISOString(),
+    note: 'Mock abnormal data generated for simulator proactive health review',
+    activity: {
+      ...snapshot.activity,
+      stepsToday: 1280,
+      activeEnergyKcalToday: 186,
+      activeEnergyGoalKcal: 480,
+      exerciseMinutesToday: 8,
+      exerciseGoalMinutes: 45,
+      standHoursToday: 3,
+      standGoalHours: 12,
+    },
+    sleep: {
+      ...snapshot.sleep,
+      asleepMinutesLast36h: 278,
+      sleepScore: 32,
+      apnea: {
+        eventCountLast30d: 4,
+        durationMinutesLast30d: 31,
+        latestEventAt: new Date(now.getTime() - 7 * 60 * 60 * 1000).toISOString(),
+        riskLevel: 'watch',
+        reminder: '夜间呼吸暂停样本提示需进一步关注',
+      },
+    },
+    heart: {
+      ...snapshot.heart,
+      restingHeartRateBpm: 84,
+      latestHeartRateBpm: 108,
+      heartRateVariabilityMs: 18,
+      vo2MaxMlKgMin: 29,
+    },
+    oxygen: {
+      ...snapshot.oxygen,
+      bloodOxygenPercent: 93,
+    },
+    metabolic: {
+      ...snapshot.metabolic,
+      bloodGlucoseMgDl: 162,
+    },
+    environment: {
+      ...snapshot.environment,
+      daylightMinutesToday: 8,
+    },
+    huawei: {
+      ...snapshot.huawei,
+      body: {
+        ...snapshot.huawei?.body,
+        bmi: 26.8,
+      },
+    },
+  };
+}
+
+export async function loadAlertingMockHealthSnapshot(): Promise<HealthKitAllData> {
+  return buildAlertingMockSnapshot();
+}
+
 function buildHuaweiHealthFallbackSnapshot(): HealthKitAllData {
   const now = new Date();
   const activity = buildMockActivityData(now);

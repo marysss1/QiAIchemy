@@ -62,6 +62,7 @@ class HealthKitManager: NSObject {
     let dispatchGroup = DispatchGroup()
     var queryError: Error?
     var sections: [String: [String: Any]] = [
+      "profile": [:],
       "activity": [:],
       "sleep": [:],
       "heart": [:],
@@ -323,11 +324,38 @@ class HealthKitManager: NSObject {
       key: "bodyTemperatureCelsius"
     )
     runLatestQuantity(
+      .height,
+      unit: HKUnit.meterUnit(with: .centi),
+      section: "body",
+      key: "heightCm"
+    )
+    runLatestQuantity(
+      .height,
+      unit: HKUnit.meterUnit(with: .centi),
+      section: "profile",
+      key: "heightCm"
+    )
+    runLatestQuantity(
       .bodyMass,
       unit: HKUnit.gramUnit(with: .kilo),
       section: "body",
       key: "bodyMassKg"
     )
+    runLatestQuantity(
+      .bodyMass,
+      unit: HKUnit.gramUnit(with: .kilo),
+      section: "profile",
+      key: "weightKg"
+    )
+
+    dispatchGroup.enter()
+    queryAge { value, error in
+      if error != nil {
+        appendNote("dateOfBirth unavailable")
+      }
+      setSectionValue(section: "profile", key: "age", value: value)
+      dispatchGroup.leave()
+    }
 
     dispatchGroup.enter()
     queryRecentWorkouts(days: 30, limit: 40) { records, error in
@@ -391,6 +419,7 @@ class HealthKitManager: NSObject {
       .bloodPressureDiastolic,
       .respiratoryRate,
       .bodyTemperature,
+      .height,
       .bodyMass,
     ]
 
@@ -398,6 +427,10 @@ class HealthKitManager: NSObject {
       if let type = HKObjectType.quantityType(forIdentifier: identifier) {
         readTypes.insert(type)
       }
+    }
+
+    if let dateOfBirthType = HKObjectType.characteristicType(forIdentifier: .dateOfBirth) {
+      readTypes.insert(dateOfBirthType)
     }
 
     if #available(iOS 16.0, *) {
@@ -430,6 +463,26 @@ class HealthKitManager: NSObject {
     }
 
     return readTypes
+  }
+
+  private func queryAge(completion: @escaping (Double?, Error?) -> Void) {
+    do {
+      let birthComponents = try healthStore.dateOfBirthComponents()
+      guard let birthDate = Calendar.current.date(from: birthComponents) else {
+        completion(nil, nil)
+        return
+      }
+
+      let ageYears = Calendar.current.dateComponents([.year], from: birthDate, to: Date()).year
+      guard let ageYears, ageYears > 0 else {
+        completion(nil, nil)
+        return
+      }
+
+      completion(Double(ageYears), nil)
+    } catch {
+      completion(nil, error)
+    }
   }
 
   private func queryLatestQuantity(

@@ -147,6 +147,12 @@ export type HealthBodyData = {
   bodyMassSeriesLast30d?: HealthTrendPoint[];
 };
 
+export type HealthProfileData = {
+  age?: number;
+  heightCm?: number;
+  weightKg?: number;
+};
+
 export type HealthSnapshotSource = 'healthkit' | 'huawei_health' | 'mock';
 
 export type HuaweiSleepStage = 'deep' | 'light' | 'rem' | 'awake' | 'nap' | 'unknown';
@@ -234,6 +240,7 @@ export type HealthKitAllData = {
   authorized: boolean;
   generatedAt: string;
   note?: string;
+  profile?: HealthProfileData;
   activity?: HealthActivityData;
   sleep?: HealthSleepData;
   heart?: HealthHeartData;
@@ -1068,6 +1075,7 @@ function normalizeHuaweiSnapshot(rawSnapshot: RawHuaweiSnapshot): HealthKitAllDa
     authorized: Boolean(rawSnapshot.authorized ?? true),
     generatedAt: rawSnapshot.generatedAt ?? nowIso,
     note: rawSnapshot.note,
+    profile: rawSnapshot.profile,
     activity: rawSnapshot.activity,
     sleep: rawSnapshot.sleep,
     heart: rawSnapshot.heart,
@@ -1183,6 +1191,7 @@ export async function loadHealthSnapshot(useMock = false): Promise<HealthKitAllD
       authorized: Boolean(nativeSnapshot?.authorized ?? true),
       generatedAt: nativeSnapshot?.generatedAt ?? new Date().toISOString(),
       note: nativeSnapshot?.note,
+      profile: nativeSnapshot?.profile,
       activity: nativeSnapshot?.activity,
       sleep: nativeSnapshot?.sleep,
       heart: nativeSnapshot?.heart,

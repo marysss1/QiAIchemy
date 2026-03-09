@@ -123,6 +123,7 @@ const API_ERROR_MESSAGE_MAP: Record<string, string> = {
   'Invalid email or password': '邮箱或密码错误',
   'Invalid username or email or password': '用户名/邮箱或密码错误',
   'Invalid username format': '用户名格式不合法',
+  'Failed to save health snapshot': '健康快照保存失败，请稍后重试',
   Unauthorized: '未授权，请重新登录',
   'Route not found': '接口不存在',
   'Validation failed': '请求参数不合法',
@@ -251,6 +252,14 @@ function localizeLegacyHealthCopy(text: string): string {
     .replace(/\bMove\b/gi, '活动')
     .replace(/\bExercise\b/gi, '锻炼')
     .replace(/\bStand\b/gi, '站立')
+    .replace(/\bwalk\b/gi, '散步')
+    .replace(/\brun\b/gi, '跑步')
+    .replace(/\bcycle\b/gi, '骑行')
+    .replace(/\bswim\b/gi, '游泳')
+    .replace(/\byoga\b/gi, '瑜伽')
+    .replace(/\bstrength\b/gi, '力量训练')
+    .replace(/\bhiit\b/gi, '高强度间歇')
+    .replace(/\bhike\b/gi, '徒步')
     .replace(/\bkcal\b/gi, '千卡')
     .replace(/\bml\/kg\/min\b/gi, '毫升/千克/分钟')
     .replace(/\bbrpm\b/gi, '次/分')
@@ -361,6 +370,14 @@ function compactSnapshotForAutoUpload(snapshot: HealthSnapshot): HealthSnapshot 
       ? {
           ...snapshot.heart,
           heartRateSeriesLast24h: truncateSeries(snapshot.heart.heartRateSeriesLast24h, AUTO_UPLOAD_SERIES_LIMIT),
+          restingHeartRateSeriesLast24h: truncateSeries(
+            snapshot.heart.restingHeartRateSeriesLast24h,
+            AUTO_UPLOAD_SERIES_LIMIT
+          ),
+          heartRateVariabilitySeriesLast24h: truncateSeries(
+            snapshot.heart.heartRateVariabilitySeriesLast24h,
+            AUTO_UPLOAD_SERIES_LIMIT
+          ),
           heartRateVariabilitySeriesLast7d: truncateSeries(
             snapshot.heart.heartRateVariabilitySeriesLast7d,
             AUTO_UPLOAD_SERIES_LIMIT
@@ -376,6 +393,10 @@ function compactSnapshotForAutoUpload(snapshot: HealthSnapshot): HealthSnapshot 
     metabolic: snapshot.metabolic
       ? {
           ...snapshot.metabolic,
+          bloodGlucoseSeriesLast24h: truncateSeries(
+            snapshot.metabolic.bloodGlucoseSeriesLast24h,
+            AUTO_UPLOAD_SERIES_LIMIT
+          ),
           bloodGlucoseSeriesLast7d: truncateSeries(snapshot.metabolic.bloodGlucoseSeriesLast7d, AUTO_UPLOAD_SERIES_LIMIT),
         }
       : undefined,
@@ -1711,7 +1732,7 @@ function LoginScreen(): React.JSX.Element {
     if (activePanel === 'chat' && chatMessages.length > 0) {
       scrollChatToBottom(true);
     }
-  }, [activePanel, chatMessages.length]);
+  }, [activePanel, chatMessages.length, scrollChatToBottom]);
 
   useEffect(() => {
     if (chatSessionId <= 0 || chatMessages.length === 0) {

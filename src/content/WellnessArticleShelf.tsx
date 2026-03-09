@@ -6,6 +6,7 @@ import {
   Modal,
   PanResponder,
   Pressable,
+  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -68,16 +69,31 @@ export function WellnessArticleShelf({
   const [selectedArticle, setSelectedArticle] = useState<WellnessArticle | null>(null);
 
   const articleDismissResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_event, gestureState) =>
-          Math.abs(gestureState.dx) > 18 && Math.abs(gestureState.dy) < 24,
+    () => {
+      let isHorizontalSwipe = false;
+
+      return PanResponder.create({
+        onMoveShouldSetPanResponder: (_event, gestureState) => {
+          isHorizontalSwipe =
+            Math.abs(gestureState.dx) > 18 &&
+            Math.abs(gestureState.dx) > Math.abs(gestureState.dy) + 8;
+          return isHorizontalSwipe;
+        },
+        onMoveShouldSetPanResponderCapture: (_event, gestureState) => {
+          isHorizontalSwipe =
+            Math.abs(gestureState.dx) > 18 &&
+            Math.abs(gestureState.dx) > Math.abs(gestureState.dy) + 8;
+          return isHorizontalSwipe;
+        },
+        onPanResponderTerminationRequest: () => false,
         onPanResponderRelease: (_event, gestureState) => {
-          if (gestureState.dx <= -60) {
+          if (isHorizontalSwipe && gestureState.dx <= -72) {
             setSelectedArticle(null);
           }
+          isHorizontalSwipe = false;
         },
-      }),
+      });
+    },
     []
   );
 
@@ -93,7 +109,7 @@ export function WellnessArticleShelf({
             </Text>
           </View>
           <Pressable style={styles.refreshButton} onPress={onRefresh} disabled={loading}>
-            <Text style={styles.refreshButtonText}>{loading ? '重抓中' : '刷新重抓'}</Text>
+            <Text style={styles.refreshButtonText}>{loading ? '更新中' : '更新文章'}</Text>
           </Pressable>
         </View>
 
@@ -137,12 +153,17 @@ export function WellnessArticleShelf({
         )}
       </View>
 
-      <Modal visible={Boolean(selectedArticle)} animationType="slide" onRequestClose={() => setSelectedArticle(null)}>
+      <Modal
+        visible={Boolean(selectedArticle)}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setSelectedArticle(null)}
+      >
         {selectedArticle ? (
-          <View style={styles.readerScreen} {...articleDismissResponder.panHandlers}>
+          <SafeAreaView style={styles.readerScreen} {...articleDismissResponder.panHandlers}>
             <View style={styles.readerHeader}>
               <View style={styles.readerHeaderTextWrap}>
-                <Text style={styles.readerEyebrow}>左滑关闭</Text>
+                <Text style={styles.readerEyebrow}>左滑返回</Text>
                 <Text style={styles.readerTitle}>{selectedArticle.title}</Text>
                 <Text style={styles.readerMeta}>
                   {selectedArticle.sourceName} · {selectedArticle.sourceSection} · {formatDate(selectedArticle.publishedAt)}
@@ -153,7 +174,11 @@ export function WellnessArticleShelf({
               </Pressable>
             </View>
 
-            <ScrollView style={styles.readerScroll} contentContainerStyle={styles.readerScrollContent}>
+            <ScrollView
+              style={styles.readerScroll}
+              contentContainerStyle={styles.readerScrollContent}
+              contentInsetAdjustmentBehavior="automatic"
+            >
               {selectedArticle.coverImageUrl ? (
                 <Image source={{ uri: selectedArticle.coverImageUrl }} style={styles.readerHeroImage} />
               ) : null}
@@ -187,7 +212,7 @@ export function WellnessArticleShelf({
                 <Text style={styles.sourceButtonText}>查看原文出处</Text>
               </Pressable>
             </ScrollView>
-          </View>
+          </SafeAreaView>
         ) : null}
       </Modal>
     </>
@@ -336,7 +361,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 12,
     paddingHorizontal: 18,
-    paddingTop: 18,
+    paddingTop: 12,
     paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(123, 92, 66, 0.15)',
@@ -363,10 +388,12 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   readerCloseButton: {
+    minWidth: 74,
     borderRadius: 999,
     backgroundColor: '#b83d31',
     paddingHorizontal: 14,
     paddingVertical: 10,
+    alignItems: 'center',
   },
   readerCloseText: {
     color: '#fffaf3',

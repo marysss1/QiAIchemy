@@ -7,6 +7,11 @@ class HealthKitManager: NSObject {
   private let healthStore = HKHealthStore()
   private let lock = NSLock()
 
+  private enum QuantitySeriesAggregation {
+    case latest
+    case average
+  }
+
   @objc
   static func requiresMainQueueSetup() -> Bool {
     false
@@ -152,6 +157,31 @@ class HealthKitManager: NSObject {
       queryTodayCumulative(identifier: identifier, unit: unit) { value, error in
         setErrorIfNeeded(error)
         setSectionValue(section: section, key: key, value: value)
+        dispatchGroup.leave()
+      }
+    }
+
+    func runQuantitySeriesLast24Hours(
+      _ identifier: HKQuantityTypeIdentifier,
+      unit: HKUnit,
+      unitLabel: String,
+      section: String,
+      key: String,
+      aggregation: QuantitySeriesAggregation = .latest,
+      transform: ((Double) -> Double)? = nil
+    ) {
+      dispatchGroup.enter()
+      queryQuantitySeriesLast24Hours(
+        identifier: identifier,
+        unit: unit,
+        unitLabel: unitLabel,
+        aggregation: aggregation,
+        transform: transform
+      ) { series, error in
+        setErrorIfNeeded(error)
+        if let series, !series.isEmpty {
+          mergeSection(section: section, values: [key: series])
+        }
         dispatchGroup.leave()
       }
     }
@@ -309,6 +339,45 @@ class HealthKitManager: NSObject {
       unit: bloodGlucoseUnit,
       section: "metabolic",
       key: "bloodGlucoseMgDl"
+    )
+
+    runQuantitySeriesLast24Hours(
+      .heartRate,
+      unit: HKUnit.count().unitDivided(by: HKUnit.minute()),
+      unitLabel: "bpm",
+      section: "heart",
+      key: "heartRateSeriesLast24h",
+      aggregation: .average
+    )
+    runQuantitySeriesLast24Hours(
+      .restingHeartRate,
+      unit: HKUnit.count().unitDivided(by: HKUnit.minute()),
+      unitLabel: "bpm",
+      section: "heart",
+      key: "restingHeartRateSeriesLast24h"
+    )
+    runQuantitySeriesLast24Hours(
+      .heartRateVariabilitySDNN,
+      unit: HKUnit.secondUnit(with: .milli),
+      unitLabel: "ms",
+      section: "heart",
+      key: "heartRateVariabilitySeriesLast24h"
+    )
+    runQuantitySeriesLast24Hours(
+      .oxygenSaturation,
+      unit: HKUnit.percent(),
+      unitLabel: "%",
+      section: "oxygen",
+      key: "bloodOxygenSeriesLast24h"
+    ) { raw in
+      raw <= 1 ? raw * 100 : raw
+    }
+    runQuantitySeriesLast24Hours(
+      .bloodGlucose,
+      unit: bloodGlucoseUnit,
+      unitLabel: "mg/dL",
+      section: "metabolic",
+      key: "bloodGlucoseSeriesLast24h"
     )
 
     runLatestQuantity(
@@ -511,6 +580,101 @@ class HealthKitManager: NSObject {
         return
       }
       completion(sample.quantity.doubleValue(for: unit), nil)
+    }
+
+    healthStore.execute(query)
+  }
+
+  private func queryQuantitySeriesLast24Hours(
+    identifier: HKQuantityTypeIdentifier,
+    unit: HKUnit,
+    unitLabel: String,
+    aggregation: QuantitySeriesAggregation = .latest,
+    transform: ((Double) -> Double)? = nil,
+    completion: @escaping ([[String: Any]]?, Error?) -> Void
+  ) {
+    guard let quantityType = HKObjectType.quantityType(forIdentifier: identifier) else {
+      completion(nil, nil)
+      return
+    }
+
+    let calendar = Calendar.current
+    let now = Date()
+    guard let start = calendar.date(byAdding: .hour, value: -24, to: now) else {
+      completion(nil, nil)
+      return
+    }
+
+    let predicate = HKQuery.predicateForSamples(
+      withStart: start,
+      end: now,
+      options: .strictStartDate
+    )
+    let sort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: true)
+
+    struct Bucket {
+      let hourStart: Date
+      var values: [Double]
+    }
+
+    let query = HKSampleQuery(
+      sampleType: quantityType,
+      predicate: predicate,
+      limit: HKObjectQueryNoLimit,
+      sortDescriptors: [sort]
+    ) { _, samples, error in
+      if let error {
+        completion(nil, error)
+        return
+      }
+
+      var buckets: [Date: Bucket] = [:]
+      for sample in (samples ?? []).compactMap({ $0 as? HKQuantitySample }) {
+        let rawValue = sample.quantity.doubleValue(for: unit)
+        let outputValue = transform?(rawValue) ?? rawValue
+        guard outputValue.isFinite else {
+          continue
+        }
+
+        let bucketDate =
+          calendar.dateInterval(of: .hour, for: sample.endDate)?.start ??
+          calendar.dateInterval(of: .hour, for: sample.startDate)?.start ??
+          sample.endDate
+        var bucket = buckets[bucketDate] ?? Bucket(
+          hourStart: bucketDate,
+          values: []
+        )
+        bucket.values.append(outputValue)
+        buckets[bucketDate] = bucket
+      }
+
+      let series = buckets.values
+        .sorted { $0.hourStart < $1.hourStart }
+        .compactMap { bucket -> [String: Any]? in
+          guard !bucket.values.isEmpty else {
+            return nil
+          }
+
+          let value: Double
+          switch aggregation {
+          case .average:
+            value = bucket.values.reduce(0, +) / Double(bucket.values.count)
+          case .latest:
+            value = bucket.values.last ?? 0
+          }
+
+          guard value.isFinite else {
+            return nil
+          }
+
+          return [
+            "timestamp": Self.isoString(from: bucket.hourStart),
+            "value": Self.round(value),
+            "unit": unitLabel,
+          ]
+        }
+
+      completion(series.isEmpty ? nil : series, nil)
     }
 
     healthStore.execute(query)
@@ -1084,23 +1248,23 @@ class HealthKitManager: NSObject {
   private func workoutTypeName(_ type: HKWorkoutActivityType) -> String {
     switch type {
     case .walking:
-      return "walk"
+      return "散步"
     case .running:
-      return "run"
+      return "跑步"
     case .cycling:
-      return "cycle"
+      return "骑行"
     case .swimming:
-      return "swim"
+      return "游泳"
     case .yoga:
-      return "yoga"
+      return "瑜伽"
     case .traditionalStrengthTraining:
-      return "strength"
+      return "力量训练"
     case .highIntensityIntervalTraining:
-      return "hiit"
+      return "高强度间歇"
     case .hiking:
-      return "hike"
+      return "徒步"
     default:
-      return "activity_\(type.rawValue)"
+      return "运动_\(type.rawValue)"
     }
   }
 

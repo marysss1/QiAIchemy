@@ -120,6 +120,8 @@ export type HealthHeartData = {
   systolicBloodPressureMmhg?: number;
   diastolicBloodPressureMmhg?: number;
   heartRateSeriesLast24h?: HealthTrendPoint[];
+  restingHeartRateSeriesLast24h?: HealthTrendPoint[];
+  heartRateVariabilitySeriesLast24h?: HealthTrendPoint[];
   heartRateVariabilitySeriesLast7d?: HealthTrendPoint[];
 };
 
@@ -130,6 +132,7 @@ export type HealthOxygenData = {
 
 export type HealthMetabolicData = {
   bloodGlucoseMgDl?: number;
+  bloodGlucoseSeriesLast24h?: HealthTrendPoint[];
   bloodGlucoseSeriesLast7d?: HealthTrendPoint[];
 };
 
@@ -600,6 +603,12 @@ function buildMockHeartData(now: Date): HealthHeartData {
   const restingHeartRateBpm = validHeartSeries.length
     ? Math.min(...validHeartSeries.map(point => point.value))
     : undefined;
+  const restingHeartRateSeriesLast24h = heartRateSeriesLast24h
+    .filter((point, index) => point.value > 0 && index % 4 === 0)
+    .map(point => ({
+      ...point,
+      value: round(clamp(point.value - randomFloat(8, 18, 1), 46, 78), 1),
+    }));
 
   const walkingHeartRateAverageBpm = round(
     validHeartSeries
@@ -608,6 +617,13 @@ function buildMockHeartData(now: Date): HealthHeartData {
     1
   );
 
+  const heartRateVariabilitySeriesLast24h = heartRateSeriesLast24h
+    .filter((point, index) => point.value > 0 && index % 3 !== 1)
+    .map(point => ({
+      timestamp: point.timestamp,
+      value: randomInt(22, 68),
+      unit: 'ms',
+    }));
   const heartRateVariabilitySeriesLast7d = Array.from({ length: 7 }, (_, index) => ({
     timestamp: isoDayOffset(now, -(6 - index), 7, 30),
     value: randomInt(20, 72),
@@ -615,6 +631,7 @@ function buildMockHeartData(now: Date): HealthHeartData {
   }));
 
   const heartRateVariabilityMs =
+    heartRateVariabilitySeriesLast24h[heartRateVariabilitySeriesLast24h.length - 1]?.value ??
     heartRateVariabilitySeriesLast7d[heartRateVariabilitySeriesLast7d.length - 1]?.value;
 
   return {
@@ -627,6 +644,8 @@ function buildMockHeartData(now: Date): HealthHeartData {
     systolicBloodPressureMmhg: randomInt(102, 134),
     diastolicBloodPressureMmhg: randomInt(62, 86),
     heartRateSeriesLast24h,
+    restingHeartRateSeriesLast24h,
+    heartRateVariabilitySeriesLast24h,
     heartRateVariabilitySeriesLast7d,
   };
 }
@@ -643,6 +662,13 @@ function buildMockOxygenData(now: Date): HealthOxygenData {
 }
 
 function buildMockMetabolicData(now: Date): HealthMetabolicData {
+  const bloodGlucoseSeriesLast24h = [6, 10, 14, 19, 22]
+    .filter(hour => hour <= now.getHours())
+    .map(hour => ({
+      timestamp: isoDayOffset(now, 0, hour, randomInt(0, 35)),
+      value: round(randomFloat(hour < 9 ? 4.6 : 5.2, hour >= 19 ? 9.6 : 7.8, 1) * 18, 1),
+      unit: 'mg/dL',
+    }));
   const points: HealthTrendPoint[] = [];
   for (let day = 6; day >= 0; day -= 1) {
     const fastingMmol = randomFloat(4.3, 6.2, 1);
@@ -659,9 +685,12 @@ function buildMockMetabolicData(now: Date): HealthMetabolicData {
     });
   }
 
-  const latestMmol = points[points.length - 1]?.value;
+  const latestMgDl =
+    bloodGlucoseSeriesLast24h[bloodGlucoseSeriesLast24h.length - 1]?.value ??
+    (points[points.length - 1]?.value ? round(points[points.length - 1].value * 18, 1) : undefined);
   return {
-    bloodGlucoseMgDl: latestMmol ? round(latestMmol * 18, 1) : undefined,
+    bloodGlucoseMgDl: latestMgDl,
+    bloodGlucoseSeriesLast24h,
     bloodGlucoseSeriesLast7d: points,
   };
 }
@@ -711,11 +740,11 @@ function buildMockWorkouts(now: Date): HealthWorkoutRecord[] {
   const count = randomInt(2, 6);
   const workouts: HealthWorkoutRecord[] = [];
   const activityTypes = [
-    { code: 37, name: 'walk' },
-    { code: 13, name: 'run' },
-    { code: 24, name: 'cycle' },
-    { code: 57, name: 'yoga' },
-    { code: 63, name: 'strength' },
+    { code: 37, name: '散步' },
+    { code: 13, name: '跑步' },
+    { code: 24, name: '骑行' },
+    { code: 57, name: '瑜伽' },
+    { code: 63, name: '力量训练' },
   ];
 
   for (let i = 0; i < count; i += 1) {
@@ -731,7 +760,7 @@ function buildMockWorkouts(now: Date): HealthWorkoutRecord[] {
       endDate: end.toISOString(),
       durationMinutes,
       totalEnergyKcal: randomInt(120, 680),
-      totalDistanceKm: activityType.name === 'strength' ? undefined : distanceKm,
+      totalDistanceKm: activityType.name === '力量训练' ? undefined : distanceKm,
     });
   }
 

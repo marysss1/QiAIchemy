@@ -41,7 +41,13 @@ type RingSpec = {
   segmentThickness: number;
 };
 
-type TrendMetricKey = 'heart' | 'hrv' | 'oxygen';
+type TrendMetricKey = 'heart' | 'restingHeart' | 'hrv' | 'oxygen' | 'glucose';
+
+type HourlyTrendSlot = {
+  slotStart: string;
+  sampleTimestamp?: string;
+  displayValue?: number;
+};
 
 const ASLEEP_STAGES: Set<HealthSleepStageOrUnknown> = new Set([
   'asleepUnspecified',
@@ -147,6 +153,22 @@ function glucoseStatusText(mmolL: number | undefined): string {
   return '正常范围';
 }
 
+function workoutLabel(value: string | undefined): string {
+  if (!value) {
+    return '运动';
+  }
+
+  return value
+    .replace(/\bwalk\b/gi, '散步')
+    .replace(/\brun\b/gi, '跑步')
+    .replace(/\bcycle\b/gi, '骑行')
+    .replace(/\bswim\b/gi, '游泳')
+    .replace(/\byoga\b/gi, '瑜伽')
+    .replace(/\bstrength\b/gi, '力量训练')
+    .replace(/\bhiit\b/gi, '高强度间歇')
+    .replace(/\bhike\b/gi, '徒步');
+}
+
 function normalizeSleepSegments(samples: HealthSleepSample[] | undefined): SleepSegment[] {
   if (!samples?.length) {
     return [];
@@ -234,13 +256,62 @@ function selectRecent24hPoints(points: HealthTrendPoint[] | undefined, maxPoints
     (left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime()
   );
   const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
-  const recent = sorted.filter(point => {
+  return sorted.filter(point => {
     const ts = new Date(point.timestamp).getTime();
     return Number.isFinite(ts) && ts >= cutoffMs;
+  }).slice(-maxPoints);
+}
+
+function startOfHour(date: Date): Date {
+  const next = new Date(date);
+  next.setMinutes(0, 0, 0);
+  return next;
+}
+
+function buildHourlySlots(
+  points: HealthTrendPoint[],
+  transformValue?: (value: number) => number
+): HourlyTrendSlot[] {
+  const now = new Date();
+  const endHour = startOfHour(now);
+  const startHourMs = endHour.getTime() - 23 * 60 * 60 * 1000;
+  const buckets = new Map<number, { sampleTimestamp: string; displayValue: number }>();
+
+  points.forEach(point => {
+    const sampleDate = new Date(point.timestamp);
+    const sampleMs = sampleDate.getTime();
+    if (!Number.isFinite(sampleMs)) {
+      return;
+    }
+
+    const hourBucket = startOfHour(sampleDate).getTime();
+    if (hourBucket < startHourMs || hourBucket > endHour.getTime()) {
+      return;
+    }
+
+    const displayValue = transformValue ? transformValue(point.value) : point.value;
+    if (!Number.isFinite(displayValue) || displayValue <= 0) {
+      return;
+    }
+
+    const existing = buckets.get(hourBucket);
+    if (!existing || new Date(existing.sampleTimestamp).getTime() <= sampleMs) {
+      buckets.set(hourBucket, {
+        sampleTimestamp: point.timestamp,
+        displayValue,
+      });
+    }
   });
 
-  const fallback = recent.length > 0 ? recent : sorted;
-  return fallback.slice(-maxPoints);
+  return Array.from({ length: 24 }, (_, index) => {
+    const slotDate = new Date(startHourMs + index * 60 * 60 * 1000);
+    const bucket = buckets.get(slotDate.getTime());
+    return {
+      slotStart: slotDate.toISOString(),
+      sampleTimestamp: bucket?.sampleTimestamp,
+      displayValue: bucket?.displayValue,
+    };
+  });
 }
 
 function chooseMainSleepBlock(blocks: SleepBlock[]): SleepBlock | null {
@@ -400,7 +471,7 @@ function TaijiRings({
   );
 }
 
-function MiniBarsInteractive({
+function HourlyDotTrendInteractive({
   title,
   points,
   color,
@@ -415,31 +486,42 @@ function MiniBarsInteractive({
   valueDigits?: number;
   transformValue?: (value: number) => number;
 }) {
-  const displayPoints = useMemo(
+  const slots = useMemo(() => buildHourlySlots(points, transformValue), [points, transformValue]);
+  const validValues = useMemo(
     () =>
-      points.map(point => ({
-        ...point,
-        displayValue: transformValue ? transformValue(point.value) : point.value,
-      })),
-    [points, transformValue]
+      slots
+        .map(slot => slot.displayValue)
+        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0),
+    [slots]
   );
-
-  const validPoints = useMemo(
-    () => displayPoints.filter(point => Number.isFinite(point.displayValue) && point.displayValue > 0),
-    [displayPoints]
-  );
-
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedIndex, setSelectedIndex] = useState(23);
 
   useEffect(() => {
-    if (validPoints.length > 0) {
-      setSelectedIndex(validPoints.length - 1);
-    } else {
-      setSelectedIndex(0);
-    }
-  }, [validPoints.length]);
+    const lastAvailableIndex = slots.reduce(
+      (latestIndex, slot, index) =>
+        typeof slot.displayValue === 'number' && slot.displayValue > 0 ? index : latestIndex,
+      -1
+    );
+    setSelectedIndex(lastAvailableIndex >= 0 ? lastAvailableIndex : slots.length - 1);
+  }, [slots]);
+  const dotChartColorStyles = useMemo(
+    () =>
+      StyleSheet.create({
+        activeShell: {
+          borderColor: `${color}44`,
+        },
+        pointBase: {
+          backgroundColor: color,
+          borderColor: `${color}CC`,
+        },
+        pointActive: {
+          borderColor: '#fff8ef',
+        },
+      }),
+    [color]
+  );
 
-  if (!validPoints.length) {
+  if (!validValues.length) {
     return (
       <View style={styles.chartSection}>
         <Text style={styles.subSectionTitle}>{title}</Text>
@@ -448,64 +530,101 @@ function MiniBarsInteractive({
     );
   }
 
-  const safeIndex = Math.min(selectedIndex, validPoints.length - 1);
-  const maxValue = Math.max(...validPoints.map(point => point.displayValue), 1);
-  const minValue = Math.min(...validPoints.map(point => point.displayValue));
+  const safeIndex = Math.min(Math.max(selectedIndex, 0), slots.length - 1);
+  const selectedSlot = slots[safeIndex];
+  const selectedHasData =
+    typeof selectedSlot.displayValue === 'number' && Number.isFinite(selectedSlot.displayValue) && selectedSlot.displayValue > 0;
+  const maxValue = Math.max(...validValues, 1);
+  const minValue = Math.min(...validValues);
   const rangeValue = Math.max(maxValue - minValue, 1);
-  const maxHeight = 66;
-  const minHeight = 10;
+  const minBottom = 18;
+  const maxBottom = 88;
+  const axisLabels = [0, 6, 12, 18, 23].map(index => ({
+    key: index,
+    text: toLocalTime(slots[index].slotStart).slice(0, 5),
+  }));
 
   return (
     <View style={styles.chartSection}>
       <Text style={styles.subSectionTitle}>{title}</Text>
-      <View style={styles.miniBarsWrap}>
-        <View style={styles.miniBarsClip}>
-          <View style={styles.miniBarsInner}>
-            {validPoints.map((point, index) => {
-              const ratio = point.displayValue / maxValue;
-              const varianceRatio = (point.displayValue - minValue) / rangeValue;
-              const height = Math.min(
-                Math.max(maxHeight * (0.65 * ratio + 0.35 * varianceRatio), minHeight),
-                maxHeight
-              );
+      <View style={styles.dotChartSurface}>
+        <View style={styles.dotChartHeader}>
+          <View style={styles.dotChartValueCard}>
+            <Text style={styles.dotChartValue}>
+              {selectedHasData ? `${fmt(selectedSlot.displayValue, valueDigits)} ${unitLabel}` : '该小时无记录'}
+            </Text>
+            <Text style={styles.dotChartMeta}>
+              {selectedHasData
+                ? `采样时间 ${toLocalTime(selectedSlot.sampleTimestamp ?? selectedSlot.slotStart)}`
+                : `时段 ${toLocalTime(selectedSlot.slotStart)}`}
+            </Text>
+          </View>
+          <Text style={styles.dotChartHint}>点按小时圆点查看具体数值</Text>
+        </View>
+
+        <View style={styles.dotChartPlot}>
+          {Array.from({ length: 4 }, (_, index) => (
+            <View
+              key={`guide-${index}`}
+              style={[
+                styles.dotChartGuide,
+                index === 3 ? styles.dotChartGuideBottom : { top: index * 28 },
+              ]}
+            />
+          ))}
+
+          <View style={styles.dotChartSlotsRow}>
+            {slots.map((slot, index) => {
+              const hasData =
+                typeof slot.displayValue === 'number' &&
+                Number.isFinite(slot.displayValue) &&
+                slot.displayValue > 0;
               const active = index === safeIndex;
-              const markerBottom = Math.min(height + 7, maxHeight + 2);
-              const markerAlignStyle =
-                index === 0
-                  ? styles.miniBarMarkerFirst
-                  : index === validPoints.length - 1
-                    ? styles.miniBarMarkerLast
-                    : styles.miniBarMarkerCenter;
+              const bottom = hasData
+                ? minBottom + ((slot.displayValue! - minValue) / rangeValue) * (maxBottom - minBottom)
+                : minBottom - 2;
+
               return (
                 <Pressable
-                  key={`${point.timestamp}-${index}`}
-                  style={styles.miniBarPressArea}
+                  key={slot.slotStart}
+                  style={[styles.dotChartSlot, active && styles.dotChartSlotActive]}
                   onPress={() => setSelectedIndex(index)}
                 >
-                  {active ? (
-                    <View style={[styles.miniBarMarker, markerAlignStyle, { bottom: markerBottom }]}>
-                      <Text style={styles.miniBarMarkerText} numberOfLines={1}>
-                        {fmt(point.displayValue, valueDigits)} {unitLabel}
-                      </Text>
+                  <View style={styles.dotChartSlotRail} />
+                  {hasData ? (
+                    <View
+                      style={[
+                        styles.dotChartPointShell,
+                        active ? dotChartColorStyles.activeShell : styles.dotChartPointShellInactive,
+                        { bottom: bottom - (active ? 10 : 7) },
+                      ]}
+                    >
+                      <View
+                        style={[
+                          styles.dotChartPoint,
+                          dotChartColorStyles.pointBase,
+                          active && styles.dotChartPointActive,
+                          active && dotChartColorStyles.pointActive,
+                        ]}
+                      />
                     </View>
-                  ) : null}
-                  <View
-                    style={[
-                      styles.miniBar,
-                      active ? styles.miniBarActive : styles.miniBarInactive,
-                      {
-                        height,
-                        backgroundColor: active ? color : `${color}AA`,
-                      },
-                    ]}
-                  />
+                  ) : (
+                    <View style={styles.dotChartGapMark} />
+                  )}
                 </Pressable>
               );
             })}
           </View>
         </View>
+
+        <View style={styles.dotChartAxisRow}>
+          {axisLabels.map(label => (
+            <Text key={label.key} style={styles.dotChartAxisLabel}>
+              {label.text}
+            </Text>
+          ))}
+        </View>
       </View>
-      <Text style={styles.chartTimeHint}>选中时间：{toLocalTime(validPoints[safeIndex].timestamp)}</Text>
     </View>
   );
 }
@@ -535,19 +654,34 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
     () => selectRecent24hPoints(snapshot.heart?.heartRateSeriesLast24h, 24),
     [snapshot.heart?.heartRateSeriesLast24h]
   );
+  const restingHeartTrend = useMemo(
+    () => selectRecent24hPoints(snapshot.heart?.restingHeartRateSeriesLast24h, 24),
+    [snapshot.heart?.restingHeartRateSeriesLast24h]
+  );
   const hrvTrend = useMemo(
-    () => selectRecent24hPoints(snapshot.heart?.heartRateVariabilitySeriesLast7d, 24),
-    [snapshot.heart?.heartRateVariabilitySeriesLast7d]
+    () => selectRecent24hPoints(snapshot.heart?.heartRateVariabilitySeriesLast24h, 24),
+    [snapshot.heart?.heartRateVariabilitySeriesLast24h]
   );
   const oxygenTrend = useMemo(
     () => selectRecent24hPoints(snapshot.oxygen?.bloodOxygenSeriesLast24h, 24),
     [snapshot.oxygen?.bloodOxygenSeriesLast24h]
   );
+  const glucoseTrend = useMemo(
+    () => selectRecent24hPoints(snapshot.metabolic?.bloodGlucoseSeriesLast24h, 24),
+    [snapshot.metabolic?.bloodGlucoseSeriesLast24h]
+  );
 
   const glucoseMmolL = mgDlToMmolL(snapshot.metabolic?.bloodGlucoseMgDl);
 
   const latestWorkout = snapshot.workouts?.[0];
-  const trendConfig = useMemo(() => {
+  const trendConfig = useMemo<{
+    title: string;
+    points: HealthTrendPoint[];
+    color: string;
+    unitLabel: string;
+    valueDigits: number;
+    transformValue?: (value: number) => number;
+  }>(() => {
     if (selectedTrendMetric === 'hrv') {
       return {
         title: '近 24 小时心率变异性（可点选）',
@@ -555,6 +689,17 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
         color: '#5f4a2f',
         unitLabel: '毫秒',
         valueDigits: 1,
+        transformValue: undefined,
+      };
+    }
+    if (selectedTrendMetric === 'restingHeart') {
+      return {
+        title: '近 24 小时静息心率（可点选）',
+        points: restingHeartTrend,
+        color: '#8f6b49',
+        unitLabel: '次/分',
+        valueDigits: 0,
+        transformValue: undefined,
       };
     }
     if (selectedTrendMetric === 'oxygen') {
@@ -564,6 +709,17 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
         color: '#c48f55',
         unitLabel: '%',
         valueDigits: 0,
+        transformValue: undefined,
+      };
+    }
+    if (selectedTrendMetric === 'glucose') {
+      return {
+        title: '近 24 小时血糖（可点选）',
+        points: glucoseTrend,
+        color: '#ab5d3b',
+        unitLabel: 'mmol/L',
+        valueDigits: 1,
+        transformValue: (value: number) => mgDlToMmolL(value) ?? value,
       };
     }
     return {
@@ -572,8 +728,9 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
       color: '#7a5b3e',
       unitLabel: '次/分',
       valueDigits: 0,
+      transformValue: undefined,
     };
-  }, [selectedTrendMetric, heartTrend, hrvTrend, oxygenTrend]);
+  }, [selectedTrendMetric, glucoseTrend, heartTrend, hrvTrend, oxygenTrend, restingHeartTrend]);
 
   return (
     <View style={styles.board}>
@@ -690,10 +847,18 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
             <Text style={styles.metricTileValue}>{fmt(snapshot.heart?.latestHeartRateBpm)} 次/分</Text>
             <Text style={styles.metricTileHint}>点按查看24h</Text>
           </Pressable>
-          <View style={styles.metricTile}>
+          <Pressable
+            style={[
+              styles.metricTile,
+              styles.metricTilePressable,
+              selectedTrendMetric === 'restingHeart' && styles.metricTileActive,
+            ]}
+            onPress={() => setSelectedTrendMetric('restingHeart')}
+          >
             <Text style={styles.metricTileLabel}>静息心率</Text>
             <Text style={styles.metricTileValue}>{fmt(snapshot.heart?.restingHeartRateBpm)} 次/分</Text>
-          </View>
+            <Text style={styles.metricTileHint}>点按查看24h</Text>
+          </Pressable>
           <Pressable
             style={[
               styles.metricTile,
@@ -718,19 +883,28 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
             <Text style={styles.metricTileValue}>{fmt(snapshot.heart?.heartRateVariabilityMs, 1)} 毫秒</Text>
             <Text style={styles.metricTileHint}>点按查看24h</Text>
           </Pressable>
-          <View style={styles.metricTile}>
-            <Text style={styles.metricTileLabel}>血糖（mmol/L）</Text>
+          <Pressable
+            style={[
+              styles.metricTile,
+              styles.metricTilePressable,
+              selectedTrendMetric === 'glucose' && styles.metricTileActive,
+            ]}
+            onPress={() => setSelectedTrendMetric('glucose')}
+          >
+            <Text style={styles.metricTileLabel}>血糖</Text>
             <Text style={styles.metricTileValue}>{fmt(glucoseMmolL, 1)}</Text>
             <Text style={styles.metricTileSub}>{glucoseStatusText(glucoseMmolL)}</Text>
-          </View>
+            <Text style={styles.metricTileHint}>点按查看24h</Text>
+          </Pressable>
         </View>
 
-        <MiniBarsInteractive
+        <HourlyDotTrendInteractive
           title={trendConfig.title}
           points={trendConfig.points}
           color={trendConfig.color}
           unitLabel={trendConfig.unitLabel}
           valueDigits={trendConfig.valueDigits}
+          transformValue={trendConfig.transformValue}
         />
       </View>
 
@@ -757,7 +931,7 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
           <Text style={styles.workoutText}>
             最近一次：
             {latestWorkout
-              ? `${latestWorkout.activityTypeName ?? '运动'} · ${hoursLabelFromMinutes(latestWorkout.durationMinutes)}`
+              ? `${workoutLabel(latestWorkout.activityTypeName) ?? '运动'} · ${hoursLabelFromMinutes(latestWorkout.durationMinutes)}`
               : '暂无'}
           </Text>
         </View>
@@ -957,85 +1131,126 @@ const styles = StyleSheet.create({
   chartSection: {
     marginTop: 10,
   },
-  miniBarsWrap: {
+  dotChartSurface: {
     borderWidth: 1,
     borderColor: '#dbc7a8',
     backgroundColor: '#fffaf1',
-    borderRadius: 8,
-    paddingHorizontal: 6,
-    paddingVertical: 6,
-    overflow: 'hidden',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 8,
   },
-  miniBarsClip: {
-    height: 96,
-    overflow: 'hidden',
-  },
-  miniBarsInner: {
-    height: 96,
+  dotChartHeader: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 3,
-    paddingTop: 20,
+    justifyContent: 'space-between',
+    gap: 10,
   },
-  miniBarPressArea: {
+  dotChartValueCard: {
     flex: 1,
-    justifyContent: 'flex-end',
-    alignItems: 'center',
-    height: '100%',
-    position: 'relative',
-  },
-  miniBar: {
-    width: '84%',
-    borderRadius: 4,
+    borderRadius: 12,
     borderWidth: 1,
-    maxHeight: 66,
+    borderColor: '#e2cfb3',
+    backgroundColor: '#fff6e8',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
-  miniBarActive: {
-    borderColor: '#ffffff',
-  },
-  miniBarInactive: {
-    borderColor: 'transparent',
-  },
-  miniBarMarker: {
-    position: 'absolute',
-    borderWidth: 1,
-    borderColor: '#ddc5a7',
-    backgroundColor: '#fff8ec',
-    minWidth: 74,
-    alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 999,
-    zIndex: 3,
-    shadowColor: '#5b4129',
-    shadowOpacity: 0.16,
-    shadowRadius: 3,
-    shadowOffset: {
-      width: 0,
-      height: 1,
-    },
-    elevation: 2,
-  },
-  miniBarMarkerCenter: {
-    left: '50%',
-    transform: [{ translateX: -37 }],
-  },
-  miniBarMarkerFirst: {
-    left: 0,
-  },
-  miniBarMarkerLast: {
-    right: 0,
-  },
-  miniBarMarkerText: {
-    color: '#5f452d',
-    fontSize: 10,
-    textAlign: 'center',
+  dotChartValue: {
+    color: '#4d3422',
+    fontSize: 16,
     fontWeight: '700',
   },
-  chartTimeHint: {
-    marginTop: 6,
-    color: '#6b5238',
+  dotChartMeta: {
+    marginTop: 4,
+    color: '#7a6148',
     fontSize: 11,
+  },
+  dotChartHint: {
+    color: '#8a6f54',
+    fontSize: 11,
+    lineHeight: 16,
+    textAlign: 'right',
+  },
+  dotChartPlot: {
+    marginTop: 12,
+    height: 104,
+    borderRadius: 12,
+    backgroundColor: '#f8efe1',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  dotChartGuide: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(120, 93, 63, 0.12)',
+  },
+  dotChartGuideBottom: {
+    bottom: 18,
+  },
+  dotChartSlotsRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+  },
+  dotChartSlot: {
+    flex: 1,
+    position: 'relative',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+  },
+  dotChartSlotActive: {
+    backgroundColor: 'rgba(197, 156, 116, 0.12)',
+  },
+  dotChartSlotRail: {
+    position: 'absolute',
+    top: 10,
+    bottom: 18,
+    width: 1,
+    backgroundColor: 'rgba(128, 98, 68, 0.08)',
+  },
+  dotChartPointShell: {
+    position: 'absolute',
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+  },
+  dotChartPointShellInactive: {
+    borderColor: 'transparent',
+  },
+  dotChartPoint: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  dotChartPointActive: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 2,
+  },
+  dotChartGapMark: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    marginBottom: 14,
+    backgroundColor: '#d2c1a9',
+  },
+  dotChartAxisRow: {
+    marginTop: 8,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  dotChartAxisLabel: {
+    color: '#7a6348',
+    fontSize: 10,
   },
   taijiWrap: {
     alignItems: 'center',

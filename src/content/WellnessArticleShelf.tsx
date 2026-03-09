@@ -86,14 +86,14 @@ export function WellnessArticleShelf({
       <View style={styles.card}>
         <View style={styles.headerRow}>
           <View style={styles.headerTextWrap}>
-            <Text style={styles.title}>青年养生秘笈</Text>
+            <Text style={styles.title}>中青年养生秘笈</Text>
             <Text style={styles.meta}>
-              官方来源结构化整理
+              围绕中青年养生、控糖、作息与代谢的官方内容
               {lastSyncedAt ? ` · 最近更新 ${formatDate(lastSyncedAt)}` : ''}
             </Text>
           </View>
           <Pressable style={styles.refreshButton} onPress={onRefresh} disabled={loading}>
-            <Text style={styles.refreshButtonText}>{loading ? '刷新中' : '刷新'}</Text>
+            <Text style={styles.refreshButtonText}>{loading ? '重抓中' : '刷新重抓'}</Text>
           </Pressable>
         </View>
 
@@ -102,7 +102,7 @@ export function WellnessArticleShelf({
         {loading && articles.length === 0 ? (
           <View style={styles.loadingWrap}>
             <ActivityIndicator color="#a53c32" />
-            <Text style={styles.loadingText}>正在获取权威养生文章…</Text>
+            <Text style={styles.loadingText}>正在抓取权威中青年养生文章…</Text>
           </View>
         ) : articles.length > 0 ? (
           <View style={styles.articleList}>

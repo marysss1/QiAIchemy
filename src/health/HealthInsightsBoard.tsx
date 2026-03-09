@@ -61,6 +61,9 @@ function hoursLabelFromMinutes(value: number | undefined | null, digits = 1): st
   if (value === undefined || value === null || Number.isNaN(value)) {
     return '--';
   }
+  if (Math.abs(value) < 60) {
+    return `${Math.round(value)} 分钟`;
+  }
   return `${(value / 60).toFixed(digits)} 小时`;
 }
 
@@ -336,9 +339,9 @@ function TaijiRings({
     },
     {
       label: '强身环',
-      value: exerciseMin / 60,
-      target: exerciseGoalMin / 60,
-      unit: '小时',
+      value: exerciseMin,
+      target: exerciseGoalMin,
+      unit: '分钟',
       color: '#bc7d42',
       trackColor: '#efe0cd',
       radius: 72,
@@ -522,10 +525,6 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
   const sleepBlocks = useMemo(() => buildSleepBlocks(sleepSegments), [sleepSegments]);
   const mainSleepBlock = useMemo(() => chooseMainSleepBlock(sleepBlocks), [sleepBlocks]);
 
-  const totalSleepHours = mainSleepBlock
-    ? mainSleepBlock.asleepMinutes / 60
-    : (snapshot.sleep?.asleepMinutesLast36h ?? 0) / 60;
-
   const sleepWindowLabel = mainSleepBlock
     ? `${toLocalTime(mainSleepBlock.startDate)} - ${toLocalTime(mainSleepBlock.endDate)}`
     : '--';
@@ -586,7 +585,7 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>睡眠分期与主睡眠时长</Text>
         <Text style={styles.sleepDocNote}>
-          睡眠分期来自苹果健康的睡眠分析数据，当前会自动识别主睡眠段并按小时显示总睡眠时长。
+          睡眠分期来自苹果健康的睡眠分析数据，当前会自动识别主睡眠段；短时长会自动换算成分钟。
         </Text>
 
         {sleepSegments.length > 0 ? (
@@ -630,7 +629,7 @@ export function HealthInsightsBoard({ snapshot }: HealthInsightsBoardProps): Rea
         <View style={styles.metricRow}>
           <View style={styles.metricPill}>
             <Text style={styles.metricLabel}>主睡眠时长</Text>
-            <Text style={styles.metricValue}>{fmt(totalSleepHours, 2)} 小时</Text>
+            <Text style={styles.metricValue}>{hoursLabelFromMinutes(mainSleepBlock?.asleepMinutes ?? snapshot.sleep?.asleepMinutesLast36h, 2)}</Text>
           </View>
           <View style={styles.metricPill}>
             <Text style={styles.metricLabel}>主睡眠区间</Text>
